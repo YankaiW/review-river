@@ -1,0 +1,16 @@
+repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.17.1            # same ruff version as in your uv.lock
+    hooks:
+      - id: ruff-check
+        args: [--fix]       # auto-fix what it can (e.g. import order)
+      - id: ruff-format
+
+  - repo: local
+    hooks:
+      - id: pyright
+        name: pyright
+        entry: uv run pyright   # uses your .venv and [tool.pyright] settings
+        language: system        # run the command as-is, no separate env
+        types: [python]         # only trigger when .py files are staged
+        pass_filenames: false   # check the whole project, not just changed files
