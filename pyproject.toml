@@ -29,3 +29,22 @@ dev = [
     "pytest-asyncio>=1.4.0",
     "ruff>=0.17.1",
 ]
+
+[tool.ruff]
+line-length = 100          # max characters per line (default 88 is a bit tight)
+target-version = "py312"   # lets ruff suggest modern 3.12 syntax
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "SIM", "RUF"]
+
+[tool.pyright]
+include = ["src", "tests"] # what to type-check
+pythonVersion = "3.12"
+typeCheckingMode = "strict"
+venvPath = "."             # where to find the virtualenv…
+venv = ".venv"             # …so pyright sees your installed packages
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]                           # where pytest looks for tests
+asyncio_mode = "auto"                           # async def tests run without a decorator
+asyncio_default_fixture_loop_scope = "function" # silences a pytest-asyncio warning
