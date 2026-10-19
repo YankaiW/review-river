@@ -35,7 +35,13 @@ line-length = 100          # max characters per line (default 88 is a bit tight)
 target-version = "py312"   # lets ruff suggest modern 3.12 syntax
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "B", "UP", "SIM", "RUF"]
+select = ["E", "F", "I", "B", "UP", "SIM", "RUF", "D"]
+
+[tool.ruff.lint.pydocstyle]
+convention = "numpy"
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["D"]
 
 [tool.pyright]
 include = ["src", "tests"] # what to type-check
