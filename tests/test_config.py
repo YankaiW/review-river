@@ -11,49 +11,49 @@ from pydantic import ValidationError
 from review_river.config import Settings
 
 
-def test_defaults_without_environment() -> None:
-    """With no environment variables, every field takes its default."""
-    settings = Settings()
+class TestSettings:
+    """Defaults, env prefix and validation of ``Settings``."""
 
-    assert settings.app_name == "review-river"
-    assert settings.classifier_backend == "keyword"
+    def test_defaults_without_environment(self) -> None:
+        """With no environment variables, every field takes its default."""
+        settings = Settings()
 
+        assert settings.app_name == "review-river"
+        assert settings.classifier_backend == "keyword"
 
-def test_prefixed_env_var_overrides_default(monkeypatch: pytest.MonkeyPatch) -> None:
-    """``REVIEW_RIVER_APP_NAME`` overrides the default ``app_name``.
+    def test_prefixed_env_var_overrides_default(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """``REVIEW_RIVER_APP_NAME`` overrides the default ``app_name``.
 
-    Parameters
-    ----------
-    monkeypatch : pytest.MonkeyPatch
-        Sets the environment variable for this test only.
-    """
-    monkeypatch.setenv("REVIEW_RIVER_APP_NAME", "test-app")
+        Parameters
+        ----------
+        monkeypatch : pytest.MonkeyPatch
+            Sets the environment variable for this test only.
+        """
+        monkeypatch.setenv("REVIEW_RIVER_APP_NAME", "test-app")
 
-    assert Settings().app_name == "test-app"
+        assert Settings().app_name == "test-app"
 
+    def test_unprefixed_env_var_is_ignored(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A plain ``APP_NAME`` without the prefix does not leak into the settings.
 
-def test_unprefixed_env_var_is_ignored(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A plain ``APP_NAME`` without the prefix does not leak into the settings.
+        Parameters
+        ----------
+        monkeypatch : pytest.MonkeyPatch
+            Sets the environment variable for this test only.
+        """
+        monkeypatch.setenv("APP_NAME", "someone-elses-app")
 
-    Parameters
-    ----------
-    monkeypatch : pytest.MonkeyPatch
-        Sets the environment variable for this test only.
-    """
-    monkeypatch.setenv("APP_NAME", "someone-elses-app")
+        assert Settings().app_name == "review-river"
 
-    assert Settings().app_name == "review-river"
+    def test_unknown_backend_is_rejected(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """An unknown ``classifier_backend`` fails at creation, so the app cannot start.
 
+        Parameters
+        ----------
+        monkeypatch : pytest.MonkeyPatch
+            Sets the environment variable for this test only.
+        """
+        monkeypatch.setenv("REVIEW_RIVER_CLASSIFIER_BACKEND", "bogus")
 
-def test_unknown_backend_is_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
-    """An unknown ``classifier_backend`` fails at creation, so the app cannot start.
-
-    Parameters
-    ----------
-    monkeypatch : pytest.MonkeyPatch
-        Sets the environment variable for this test only.
-    """
-    monkeypatch.setenv("REVIEW_RIVER_CLASSIFIER_BACKEND", "bogus")
-
-    with pytest.raises(ValidationError):
-        Settings()
+        with pytest.raises(ValidationError):
+            Settings()

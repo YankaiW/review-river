@@ -6,6 +6,8 @@ sources. Business rules live in ``domain``; everything else depends on it.
 
 Modules
 -------
+api
+    FastAPI app with the ``/health`` and ``/classify`` endpoints.
 domain
     Business concepts: ``Review``, ``Category``, ``Classification``.
 classifier

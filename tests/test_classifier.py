@@ -77,12 +77,15 @@ class TestKeywordClassifier:
         assert crash.category is Category.OTHER
 
 
-def test_keyword_classifier_satisfies_protocol() -> None:
-    """``KeywordClassifier`` fits the ``Classifier`` port.
+class TestClassifierProtocol:
+    """Conformance of adapters to the ``Classifier`` port."""
 
-    The check is done by pyright on the annotated assignment; the assert only
-    keeps the variable used.
-    """
-    classifier: Classifier = KeywordClassifier()
+    def test_keyword_classifier_satisfies_protocol(self) -> None:
+        """``KeywordClassifier`` fits the ``Classifier`` port.
 
-    assert classifier is not None
+        The check is done by pyright on the annotated assignment; the assert only
+        keeps the variable used.
+        """
+        classifier: Classifier = KeywordClassifier()
+
+        assert classifier is not None
