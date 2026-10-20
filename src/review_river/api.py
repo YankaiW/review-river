@@ -14,7 +14,7 @@ app = FastAPI(title=get_settings().app_name)
 
 
 @app.get("/health")
-async def heath() -> dict[str, str]:
+async def health() -> dict[str, str]:
     """Report that the service is up.
 
     Used by Docker and load balancers to check liveness. Does not touch the
