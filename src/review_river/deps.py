@@ -38,3 +38,5 @@ def get_classifier(settings: Annotated[Settings, Depends(get_settings)]) -> Clas
     match settings.classifier_backend:
         case "keyword":
             return KeywordClassifier()
+        case "llm":
+            raise NotImplementedError("LLM backend arrives in session 3")

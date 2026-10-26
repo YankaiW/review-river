@@ -57,3 +57,43 @@ class TestSettings:
 
         with pytest.raises(ValidationError):
             Settings()
+
+    def test_llm_defaults_without_environment(self) -> None:
+        """With no environment variables, the LLM fields take their defaults and no key is set."""
+        settings = Settings()
+
+        assert settings.llm_model == "claude-opus-5-5"
+        assert settings.llm_effort == "low"
+        assert settings.llm_timeout_s == 10.0
+        assert settings.llm_max_retries == 2
+        assert settings.anthropic_api_key is None
+
+    def test_llm_backend_without_key_is_rejected(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Choosing the ``llm`` backend without an API key fails at creation.
+
+        Parameters
+        ----------
+        monkeypatch : pytest.MonkeyPatch
+            Sets the environment variable for this test only.
+        """
+        monkeypatch.setenv("REVIEW_RIVER_CLASSIFIER_BACKEND", "llm")
+
+        with pytest.raises(ValidationError):
+            Settings()
+
+    def test_llm_backend_with_key_hides_it(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """With a key the ``llm`` backend is accepted, and the key never shows in ``repr``.
+
+        Parameters
+        ----------
+        monkeypatch : pytest.MonkeyPatch
+            Sets the environment variables for this test only.
+        """
+        monkeypatch.setenv("REVIEW_RIVER_CLASSIFIER_BACKEND", "llm")
+        monkeypatch.setenv("REVIEW_RIVER_ANTHROPIC_API_KEY", "sk-ant-test-123")
+
+        settings = Settings()
+
+        assert settings.anthropic_api_key is not None
+        assert settings.anthropic_api_key.get_secret_value() == "sk-ant-test-123"
+        assert "sk-ant-test-123" not in repr(settings)
