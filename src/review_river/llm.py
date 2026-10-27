@@ -1,10 +1,48 @@
 """Thin async wrapper around the Anthropic SDK: structured calls, typed errors."""
 
+import logging
+import time
 from typing import Literal
 
 import httpx2
 from anthropic import AsyncAnthropic
+from anthropic.types import Usage
 from pydantic import BaseModel, ValidationError
+
+logger = logging.getLogger(__name__)
+
+# USD per million tokens: (input, output). Source: platform.claude.com pricing page
+PRICES_PER_MTOK: dict[str, tuple[float, float]] = {
+    "claude-opus-5-5": (4.00, 20.00),
+    "claude-haiku-5-5": (0.10, 0.50),
+}
+
+
+def _cost_usd(model: str, usage: Usage) -> float:
+    """Return the USD cost of one call from its token usage.
+
+    Cache reads cost 0.1x the input price and cache writes 1.25x (5-minute
+    TTL). ``output_tokens`` already includes thinking tokens.
+
+    Parameters
+    ----------
+    model : str
+        Model id; must be a key of ``PRICES_PER_MTOK``.
+    usage : anthropic.types.Usage
+        The ``usage`` block of the response.
+
+    Returns
+    -------
+    float
+        Cost in USD.
+    """
+    price_in, price_out = PRICES_PER_MTOK[model]
+    return (
+        usage.input_tokens * price_in
+        + (usage.cache_read_input_tokens or 0) * price_in * 0.1
+        + (usage.cache_creation_input_tokens or 0) * price_in * 1.25
+        + usage.output_tokens * price_out
+    ) / 1000000
 
 
 class LLMError(Exception):
@@ -48,6 +86,9 @@ class LLMClient:
         max_retries: int,
         http_client: httpx2.AsyncClient | None = None,
     ) -> None:
+        if model not in PRICES_PER_MTOK:
+            raise ValueError(f"no price for model {model!r}; add it to PRICES_PER_MTOK")
+
         self._client = AsyncAnthropic(
             api_key=api_key, timeout=timeout_s, max_retries=max_retries, http_client=http_client
         )
@@ -89,6 +130,7 @@ class LLMClient:
             Passed through unchanged after the SDK's retries (connection
             errors, timeouts, 4xx/5xx).
         """
+        start = time.perf_counter()
         try:
             response = await self._client.messages.parse(
                 model=self._model,
@@ -104,9 +146,26 @@ class LLMClient:
                 system=system,
             )
         except ValidationError as e:
+            # Not logged: the SDK raised inside parse(), so there is no response (usage, request id)
             raise LLMOutputError(
                 "Output is not valid JSON for the schema (cut off by max_tokens?)"
             ) from e
+
+        latency_ms = (time.perf_counter() - start) * 1000
+        logger.info(
+            (
+                "llm_call model=%s in=%d out=%d cache_read=%d latency_ms=%.0f "
+                + "cost_usd=%.6f stop=%s request_id=%s"
+            ),
+            self._model,
+            response.usage.input_tokens,
+            response.usage.output_tokens,
+            response.usage.cache_read_input_tokens or 0,
+            latency_ms,
+            _cost_usd(self._model, response.usage),
+            response.stop_reason,
+            response._request_id,  # pyright: ignore[reportPrivateUsage]
+        )
 
         if response.stop_reason != "end_turn":
             raise LLMOutputError(f"stop_reason={response.stop_reason}")
