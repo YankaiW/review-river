@@ -1,12 +1,17 @@
-"""Classifier port and its rule-based keyword adapter."""
+"""Classifier port and its adapters: rule-based keywords and an LLM."""
 
+import logging
 import re
 from collections.abc import Mapping
 from typing import Protocol
 
+from anthropic import APIError
 from pydantic import BaseModel, Field
 
 from review_river.domain import Category, Classification, Review
+from review_river.llm import LLMError
+
+logger = logging.getLogger(__name__)
 
 DEFAULT_KEYWORDS: Mapping[Category, tuple[str, ...]] = {
     Category.BUG: ("crash", "bug", "freeze", "error"),
@@ -213,3 +218,63 @@ class StructuredLLM(Protocol):
             The validated instance of ``schema``.
         """
         ...
+
+
+class LLMClassifier:
+    """LLM adapter: asks a model for an ``LLMLabel`` and maps it to a ``Classification``.
+
+    Each call logs the label with its ``reason``; the review text is not logged.
+
+    Parameters
+    ----------
+    llm : StructuredLLM
+        Client that returns schema-validated answers; ``LLMClient`` in the
+        app, a fake in tests. Create it once and share it across requests.
+    max_tokens : int, default 1024
+        Output cap per call, thinking included. Too low a value ends the
+        answer with ``stop_reason="max_tokens"`` and the call fails.
+    """
+
+    def __init__(self, llm: StructuredLLM, max_tokens: int = 1024) -> None:
+        self._llm = llm
+        self._max_tokens = max_tokens
+
+    async def classify(self, review: Review) -> Classification:
+        """Classify one review with the LLM.
+
+        Parameters
+        ----------
+        review : Review
+            The review to classify; sent as the user turn inside ``<review>`` tags.
+
+        Returns
+        -------
+        Classification
+            The model's category and self-reported confidence.
+
+        Raises
+        ------
+        ClassifierUnavailable
+            If the provider call fails (connection, timeout, 4xx/5xx after
+            retries) or the model gives no usable answer. The original error
+            is chained as ``__cause__``.
+        """
+        try:
+            label = await self._llm.parse(
+                system=SYSTEM_PROMPT,
+                prompt=f"<review>\n{review.text}\n</review>",
+                schema=LLMLabel,
+                max_tokens=self._max_tokens,
+            )
+        except LLMError as e:
+            raise ClassifierUnavailable("LLM gave no usable answer") from e
+        except APIError as e:
+            raise ClassifierUnavailable("LLM provider call failed") from e
+
+        logger.info(
+            "llm_label category=%s confidence=%.2f reason=%r",
+            label.category,
+            label.confidence,
+            label.reason,
+        )
+        return Classification(category=label.category, confidence=label.confidence)
