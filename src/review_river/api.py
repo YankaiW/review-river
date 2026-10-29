@@ -5,11 +5,14 @@ from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from typing import Annotated
 
-from fastapi import Depends, FastAPI
+from fastapi import Depends, FastAPI, Request
+from fastapi.responses import JSONResponse
 
-from review_river.classifier import Classifier
+from review_river.classifier import Classifier, ClassifierUnavailable
 from review_river.deps import build_llm, get_classifier, get_settings
 from review_river.domain import Classification, Review
+
+logger = logging.getLogger(__name__)
 
 ClassifierDep = Annotated[Classifier, Depends(get_classifier)]
 
@@ -43,6 +46,34 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
 
 
 app = FastAPI(title=get_settings().app_name, lifespan=lifespan)
+
+
+@app.exception_handler(ClassifierUnavailable)
+async def classifier_unavailable(request: Request, exc: ClassifierUnavailable) -> JSONResponse:
+    """Turn ``ClassifierUnavailable`` into HTTP 503 for every endpoint.
+
+    The original error (``exc.__cause__``) is logged but not returned, since
+    provider messages are internal. Other exceptions still give 500, so bugs
+    are not reported as outages.
+
+    Parameters
+    ----------
+    request : Request
+        The request that failed; its path goes to the log.
+    exc : ClassifierUnavailable
+        The error raised by the classifier adapter.
+
+    Returns
+    -------
+    JSONResponse
+        503 with a generic ``detail`` and ``Retry-After: 5``.
+    """
+    logger.warning("classifier_unavailable path=%s cause=%r", request.url.path, exc.__cause__)
+    return JSONResponse(
+        status_code=503,
+        content={"detail": "classifier unavailable, try again later"},
+        headers={"Retry-After": "5"},
+    )
 
 
 @app.get("/health")

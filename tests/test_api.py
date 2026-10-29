@@ -6,15 +6,18 @@ serialisation; the classifier is replaced by ``FakeClassifier`` via
 ``test_classifier.py``, so these tests stay few and check the HTTP contract.
 """
 
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
+from typing import Any
 
 import pytest
 from fastapi.testclient import TestClient
+from pydantic import BaseModel
 
 from review_river.api import app
-from review_river.deps import get_classifier, get_settings
+from review_river.classifier import ClassifierUnavailable
+from review_river.deps import get_classifier, get_llm, get_settings
 from review_river.domain import Category, Classification, Review
-from review_river.llm import LLMClient
+from review_river.llm import LLMClient, LLMOutputError
 
 
 class FakeClassifier:
@@ -199,3 +202,139 @@ class TestLifespan:
             assert not llm._client.is_closed()  # pyright: ignore[reportPrivateUsage]
 
         assert llm._client.is_closed()  # pyright: ignore[reportPrivateUsage]
+
+
+class RaisingClassifier:
+    """Test adapter whose ``classify`` always raises the given error.
+
+    Parameters
+    ----------
+    error : Exception
+        Raised on every call.
+    """
+
+    def __init__(self, error: Exception) -> None:
+        self.error = error
+
+    async def classify(self, review: Review) -> Classification:
+        """Raise the configured error.
+
+        Parameters
+        ----------
+        review : Review
+            Ignored.
+
+        Returns
+        -------
+        Classification
+            Never returns.
+        """
+        raise self.error
+
+
+class FailingLLM:
+    """Stand-in for ``LLMClient`` whose ``parse`` always fails with no usable output."""
+
+    async def parse[T: BaseModel](
+        self, *, system: str, prompt: str, schema: type[T], max_tokens: int = 1024
+    ) -> T:
+        """Raise ``LLMOutputError`` as a ``max_tokens`` cut-off would.
+
+        Parameters
+        ----------
+        system : str
+            Ignored.
+        prompt : str
+            Ignored.
+        schema : type[T]
+            Ignored.
+        max_tokens : int, default 1024
+            Ignored.
+
+        Returns
+        -------
+        T
+            Never returns.
+        """
+        raise LLMOutputError("stop_reason=max_tokens")
+
+
+@pytest.fixture
+def overrides() -> Iterator[dict[Callable[..., Any], Callable[..., Any]]]:
+    """Give a test the app's dependency overrides and clear them afterwards.
+
+    Yields
+    ------
+    dict[Callable[..., Any], Callable[..., Any]]
+        ``app.dependency_overrides``, to fill in the test.
+    """
+    yield app.dependency_overrides
+    app.dependency_overrides.clear()
+
+
+class TestClassifierErrors:
+    """HTTP status of classifier failures: 503 for outages, 500 for bugs."""
+
+    def test_unavailable_gives_503_without_internal_detail(
+        self,
+        overrides: dict[Callable[..., Any], Callable[..., Any]],
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """``ClassifierUnavailable`` gives 503 with a generic body; the cause is only logged.
+
+        Parameters
+        ----------
+        overrides : dict[Callable[..., Any], Callable[..., Any]]
+            The app's dependency overrides.
+        caplog : pytest.LogCaptureFixture
+            Captures log records emitted during the test.
+        """
+        error = ClassifierUnavailable("LLM provider call failed")
+        error.__cause__ = RuntimeError("internal provider detail")
+        overrides[get_classifier] = lambda: RaisingClassifier(error)
+
+        response = TestClient(app).post("/classify", json={"text": "Game crashes"})
+
+        assert response.status_code == 503
+        assert response.json() == {"detail": "classifier unavailable, try again later"}
+        assert response.headers["retry-after"] == "5"
+        assert "internal provider detail" not in response.text
+        assert "classifier_unavailable path=/classify" in caplog.text
+        assert "internal provider detail" in caplog.text
+
+    def test_unexpected_error_gives_500(
+        self, overrides: dict[Callable[..., Any], Callable[..., Any]]
+    ) -> None:
+        """Any other exception is a bug and stays a 500, not a 503.
+
+        Parameters
+        ----------
+        overrides : dict[Callable[..., Any], Callable[..., Any]]
+            The app's dependency overrides.
+        """
+        overrides[get_classifier] = lambda: RaisingClassifier(RuntimeError("bug"))
+
+        client = TestClient(app, raise_server_exceptions=False)
+        response = client.post("/classify", json={"text": "Game crashes"})
+
+        assert response.status_code == 500
+
+    @pytest.mark.usefixtures("llm_backend")
+    def test_llm_output_error_reaches_client_as_503(
+        self, overrides: dict[Callable[..., Any], Callable[..., Any]]
+    ) -> None:
+        """Full chain: ``LLMOutputError`` → ``LLMClassifier`` → ``ClassifierUnavailable`` → 503.
+
+        Only the LLM is faked; settings, ``get_classifier``, the adapter and
+        the handler are real.
+
+        Parameters
+        ----------
+        overrides : dict[Callable[..., Any], Callable[..., Any]]
+            The app's dependency overrides.
+        """
+        overrides[get_llm] = FailingLLM
+
+        response = TestClient(app).post("/classify", json={"text": "Game crashes"})
+
+        assert response.status_code == 503
