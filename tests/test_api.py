@@ -12,8 +12,9 @@ import pytest
 from fastapi.testclient import TestClient
 
 from review_river.api import app
-from review_river.deps import get_classifier
+from review_river.deps import get_classifier, get_settings
 from review_river.domain import Category, Classification, Review
+from review_river.llm import LLMClient
 
 
 class FakeClassifier:
@@ -154,3 +155,47 @@ class TestClassifyEndpoint:
 
         assert response.status_code == 200
         assert response.json()["category"] == "bug"
+
+
+@pytest.fixture
+def llm_backend(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """Switch the settings to the ``"llm"`` backend with a fake key for one test.
+
+    Parameters
+    ----------
+    monkeypatch : pytest.MonkeyPatch
+        Sets the environment variables for this test only.
+
+    Yields
+    ------
+    None
+        Control passes to the test while ``get_settings`` reads the LLM settings.
+    """
+    monkeypatch.setenv("REVIEW_RIVER_CLASSIFIER_BACKEND", "llm")
+    monkeypatch.setenv("REVIEW_RIVER_ANTHROPIC_API_KEY", "sk-ant-test")
+    get_settings.cache_clear()
+    yield
+    get_settings.cache_clear()
+
+
+class TestLifespan:
+    """Startup and shutdown of the shared LLM client.
+
+    Only ``with TestClient(app)`` runs the lifespan; a bare ``TestClient(app)``
+    skips it.
+    """
+
+    def test_keyword_backend_stores_no_client(self) -> None:
+        """With the keyword backend, ``app.state.llm`` is ``None``."""
+        with TestClient(app):
+            assert app.state.llm is None
+
+    @pytest.mark.usefixtures("llm_backend")
+    def test_llm_backend_shares_one_client_and_closes_it(self) -> None:
+        """One ``LLMClient`` is built at startup, stored on the app and closed on shutdown."""
+        with TestClient(app):
+            llm = app.state.llm
+            assert isinstance(llm, LLMClient)
+            assert not llm._client.is_closed()  # pyright: ignore[reportPrivateUsage]
+
+        assert llm._client.is_closed()  # pyright: ignore[reportPrivateUsage]

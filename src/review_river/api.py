@@ -1,16 +1,48 @@
 """HTTP entrypoint: FastAPI app exposing health and classification endpoints."""
 
+import logging
+from collections.abc import AsyncGenerator
+from contextlib import asynccontextmanager
 from typing import Annotated
 
 from fastapi import Depends, FastAPI
 
 from review_river.classifier import Classifier
-from review_river.deps import get_classifier, get_settings
+from review_river.deps import build_llm, get_classifier, get_settings
 from review_river.domain import Classification, Review
 
 ClassifierDep = Annotated[Classifier, Depends(get_classifier)]
 
-app = FastAPI(title=get_settings().app_name)
+
+@asynccontextmanager
+async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
+    """Set up shared resources at startup and release them on shutdown.
+
+    Sets logging to INFO so the LLM call and label lines are visible, builds
+    one LLM client per process (or none for the keyword backend), stores it
+    on ``app.state.llm`` and closes it when the app stops.
+
+    Parameters
+    ----------
+    app : FastAPI
+        The application being started.
+
+    Yields
+    ------
+    None
+        Control passes to the running app until shutdown.
+    """
+    logging.basicConfig(level=logging.INFO)
+    llm = build_llm(get_settings())
+    app.state.llm = llm
+    try:
+        yield
+    finally:
+        if llm is not None:
+            await llm.close()
+
+
+app = FastAPI(title=get_settings().app_name, lifespan=lifespan)
 
 
 @app.get("/health")
