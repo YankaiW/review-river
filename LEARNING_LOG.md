@@ -31,6 +31,11 @@ Smoke run, 20 samples, effort `low`, sequential calls:
 - Misses before the rules were label-policy gaps, not model errors: a question about upcoming DLC and "cannot be played on Mac". Fixed by routing on topic rather than tone, and calling platform failures bugs.
 - At n=20 one review is 5 points of accuracy, so accuracy cannot separate the models; cost and latency can.
 
+Break-its, failure paths:
+
+- Wrong API key: the client gets 503 with `Retry-After: 5`; the 401 is not retried. The app starts fine with a bad key, since only its presence is checked.
+- `max_tokens=16`: 503, and no `llm_call` line. The JSON was cut off, so `messages.parse` raised before any usage was read: a billed call that is neither logged nor counted in `total_cost_usd`.
+
 Break-it, shared client vs a new client per request: 50 concurrent `/classify` requests on Haiku 5.5, second (warm) burst:
 
 | client | p50 | statuses |
