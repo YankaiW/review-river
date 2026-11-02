@@ -30,3 +30,12 @@ Smoke run, 20 samples, effort `low`, sequential calls:
 - Caching: call 1 writes ~1,474 tokens at 1.25× the input price, calls 2–20 read them at 0.05× (Opus) or 0.1× (Haiku). Below 512 tokens nothing is cached.
 - Misses before the rules were label-policy gaps, not model errors: a question about upcoming DLC and "cannot be played on Mac". Fixed by routing on topic rather than tone, and calling platform failures bugs.
 - At n=20 one review is 5 points of accuracy, so accuracy cannot separate the models; cost and latency can.
+
+Break-it, shared client vs a new client per request: 50 concurrent `/classify` requests on Haiku 5.5, second (warm) burst:
+
+| client | p50 | statuses |
+|---|---|---|
+| shared, built in the lifespan | 1.56 s | 50 × 200 |
+| new per request, never closed | 1.67 s | 50 × 200 |
+
+- ~110 ms (7%) more per request: a new TCP + TLS handshake and HTTP client every time. Small next to model latency; the stronger case for one client is bounded sockets and no unclosed clients piling up. One run per arm, so the gap is indicative.
