@@ -33,6 +33,18 @@ Endpoints depend only on the `Classifier` protocol. Adapters are injected via
 FastAPI's `Depends`, so tests swap in a fake and production swaps in an LLM
 without touching the API code.
 
+## Request flow
+
+A successful `POST /classify` with the LLM backend:
+
+![Successful POST /classify with the LLM backend](docs/request-flow.svg)
+
+Every way it can fail, and what the client sees. Provider and output failures
+all become `ClassifierUnavailable`, which the exception handler turns into 503;
+only unplanned exceptions give 500, so bugs never pass for outages.
+
+![Error flows of /classify: where it fails, what is raised, what the client sees](docs/error-flows.svg)
+
 ## Quickstart
 
 Requires [uv](https://docs.astral.sh/uv/) (it installs Python 3.12 if needed).
