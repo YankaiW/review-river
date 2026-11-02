@@ -33,6 +33,41 @@ Endpoints depend only on the `Classifier` protocol. Adapters are injected via
 FastAPI's `Depends`, so tests swap in a fake and production swaps in an LLM
 without touching the API code.
 
+## Request flow
+
+A successful `POST /classify` with the LLM backend:
+
+```mermaid
+flowchart TD
+    A["Client: POST /classify"] --> B["FastAPI validates Review<br/>pydantic, text not empty"]
+    B --> C["get_classifier via Depends<br/>shared LLMClient from app.state"]
+    C --> D["LLMClassifier → LLMClient.parse<br/>cached system prompt + review"]
+    D --> E["Anthropic API<br/>cache read, schema-shaped JSON"]
+    E --> F["Cost + llm_call log line<br/>tokens, cost, request id"]
+    F --> G["Checks pass<br/>stop_reason end_turn, confidence in 0–1"]
+    G --> H["200 Classification<br/>category, confidence; reason logged"]
+```
+
+Every way it can fail, and what the client sees. Provider and output failures
+all become `ClassifierUnavailable`, which the exception handler turns into 503;
+only unplanned exceptions give 500, so bugs never pass for outages.
+
+```mermaid
+flowchart LR
+    e1["Empty review text"] --> r1["RequestValidationError<br/>classifier never called"] --> s1["422"]
+    e2["429, 529, 5xx, timeout"] --> r2["SDK retries 2×<br/>APIError if all fail"] --> s2["503 + Retry-After: 5"]
+    e3["401, 403, 400, 404"] --> r3["APIError, not retried"] --> s3["503<br/>known issue: should be 500"]
+    e4["Truncated JSON<br/>max_tokens mid-answer"] --> r4["LLMOutputError<br/>known issue: unlogged, still billed"] --> s4["503 + Retry-After: 5"]
+    e5["Refusal or no text block"] --> r5["LLMOutputError<br/>logged, then raised"] --> s5["503 + Retry-After: 5"]
+    e6["Any other exception"] --> r6["Not handled<br/>traceback in server log"] --> s6["500"]
+    e7["llm backend without a key"] --> r7["Settings validation error"] --> s7["App does not start"]
+
+    classDef unavailable fill:#FAEEDA,stroke:#854F0B,color:#633806
+    classDef broken fill:#FCEBEB,stroke:#A32D2D,color:#791F1F
+    class s2,s3,s4,s5 unavailable
+    class s6,s7 broken
+```
+
 ## Quickstart
 
 Requires [uv](https://docs.astral.sh/uv/) (it installs Python 3.12 if needed).
