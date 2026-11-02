@@ -6,7 +6,7 @@
 - **Surprised:** 5 concurrent requests, 2 s of sleep each: `async def` + `time.sleep` → 10 s; `async def` + `await asyncio.sleep` → 2 s; `def` + `time.sleep` → 2 s.
 - **Broke:** a blocking call inside `async def` freezes the event loop, so every other request waits, `/health` included.
 - **Open question:** ?
-- **Time:** ?h
+- **Time:** 1 week
 
 ## W2: LLM call layer (2026-11-02)
 
@@ -14,7 +14,7 @@
 - **Surprised:** before caching, input was ~84% of Opus's cost per call because a ~1,474-token prompt prefix repeats on every call; after caching, output (thinking plus `reason`) is ~76%. Haiku matched Opus at 1/33 of the cost.
 - **Broke:** `_cost_usd` billed cache reads at `price_in × 0.20` instead of $0.20/MTok (caught before a cached run). A top-level `cache_control` would have put the breakpoint on the review, which changes every call, so nothing would be reused.
 - **Open question:** the 20 samples shaped the prompt rules, so 100% is training accuracy. How well does it do on reviews it has never seen (W4 Steam data), and is `confidence` calibrated?
-- **Time:** ?h
+- **Time:** 8 days
 
 Smoke run, 20 samples, effort `low`, sequential calls:
 
