@@ -43,7 +43,7 @@ convention = "numpy"
 "tests/*" = ["D"]
 
 [tool.pyright]
-include = ["src", "tests"] # what to type-check
+include = ["src", "tests", "scripts"] # what to type-check
 pythonVersion = "3.12"
 typeCheckingMode = "strict"
 venvPath = "."             # where to find the virtualenv…

@@ -1,5 +1,5 @@
 .DEFAULT_GOAL := help
-.PHONY: help install format lint typecheck test check run clean docker-build docker-run
+.PHONY: help install format lint typecheck test check run smoke clean docker-build docker-run
 
 help:  ## Show this list
 	@grep -E '^[a-z-]+:.*## ' $(MAKEFILE_LIST) | awk -F':.*## ' '{printf "  make %-13s %s\n", $$1, $$2}'
@@ -26,6 +26,9 @@ check: lint typecheck test  ## Everything CI runs: lint, typecheck, test
 
 run:  ## Start the API with auto-reload on http://127.0.0.1:8000
 	uv run uvicorn review_river.api:app --reload
+
+smoke:  ## Compare models on scripts/samples.jsonl (real API calls, ~$0.15)
+	uv run python scripts/smoke_llm.py
 
 clean:  ## Remove caches
 	find . -type d -name __pycache__ -not -path './.venv/*' -exec rm -rf {} +
