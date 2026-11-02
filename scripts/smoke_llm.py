@@ -2,11 +2,12 @@
 
 Prints accuracy, errors, cost per 1K reviews and p50 latency per model, then
 the misclassified reviews. Calls the real API: needs the key in ``.env`` and
-costs about $0.15 per run. Run with ``make smoke``.
+costs about $0.05 per run with the prompt cached. Run with ``make smoke``.
 """
 
 import asyncio
 import json
+import logging
 import statistics
 import time
 from dataclasses import dataclass
@@ -164,6 +165,7 @@ def print_table(results: list[ModelResult]) -> None:
 
 async def main() -> None:
     """Run every model in ``MODELS`` over ``SAMPLES`` and print the comparison."""
+    logging.basicConfig(level=logging.INFO)
     settings = get_settings()
     samples = load_samples(SAMPLES)
     results = [await run_model(model=model, samples=samples, settings=settings) for model in MODELS]

@@ -11,18 +11,18 @@ from pydantic import BaseModel, ValidationError
 
 logger = logging.getLogger(__name__)
 
-# USD per million tokens: (input, output). Source: platform.claude.com pricing page
-PRICES_PER_MTOK: dict[str, tuple[float, float]] = {
-    "claude-opus-5-5": (4.00, 20.00),
-    "claude-haiku-5-5": (0.10, 0.50),
+# USD per million tokens: (input, output, cache read). Source: platform.claude.com pricing page
+PRICES_PER_MTOK: dict[str, tuple[float, float, float]] = {
+    "claude-opus-5-5": (4.00, 20.00, 0.20),
+    "claude-haiku-5-5": (0.10, 0.50, 0.01),
 }
 
 
 def _cost_usd(model: str, usage: Usage) -> float:
     """Return the USD cost of one call from its token usage.
 
-    Cache reads cost 0.1x the input price and cache writes 1.25x (5-minute
-    TTL). ``output_tokens`` already includes thinking tokens.
+    Cache reads use the per-model price in PRICES_PER_MTOK and cache writes 1.25x
+    (5-minute TTL). ``output_tokens`` already includes thinking tokens.
 
     Parameters
     ----------
@@ -36,10 +36,10 @@ def _cost_usd(model: str, usage: Usage) -> float:
     float
         Cost in USD.
     """
-    price_in, price_out = PRICES_PER_MTOK[model]
+    price_in, price_out, price_cache_read = PRICES_PER_MTOK[model]
     return (
         usage.input_tokens * price_in
-        + (usage.cache_read_input_tokens or 0) * price_in * 0.1
+        + (usage.cache_read_input_tokens or 0) * price_cache_read
         + (usage.cache_creation_input_tokens or 0) * price_in * 1.25
         + usage.output_tokens * price_out
     ) / 1000000
@@ -114,7 +114,9 @@ class LLMClient:
         Parameters
         ----------
         system : str
-            System prompt: task, definitions, examples.
+            System prompt: task, definitions, examples. Sent with a cache
+            breakpoint, so calls within 5 minutes read it from the cache;
+            prefixes under the model's minimum (512 tokens) are not cached.
         prompt : str
             User turn, e.g. the review text.
         schema : type[T]
@@ -150,7 +152,7 @@ class LLMClient:
                 ],
                 output_config={"effort": self._effort},
                 output_format=schema,
-                system=system,
+                system=[{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}],
             )
         except ValidationError as e:
             # Not logged: the SDK raised inside parse(), so there is no response (usage, request id)
@@ -163,13 +165,14 @@ class LLMClient:
         self.total_cost_usd += cost
         logger.info(
             (
-                "llm_call model=%s in=%d out=%d cache_read=%d latency_ms=%.0f "
-                + "cost_usd=%.6f stop=%s request_id=%s"
+                "llm_call model=%s in=%d out=%d cache_read=%d cache_write=%d "
+                + "latency_ms=%.0f cost_usd=%.6f stop=%s request_id=%s"
             ),
             self._model,
             response.usage.input_tokens,
             response.usage.output_tokens,
             response.usage.cache_read_input_tokens or 0,
+            response.usage.cache_creation_input_tokens or 0,
             latency_ms,
             cost,
             response.stop_reason,

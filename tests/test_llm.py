@@ -21,7 +21,9 @@ class Label(BaseModel):
     confidence: float
 
 
-def message_json(text: str, stop_reason: str = "end_turn") -> dict[str, object]:
+def message_json(
+    text: str, stop_reason: str = "end_turn", *, cache_read: int = 0, cache_write: int = 0
+) -> dict[str, object]:
     """Build a Messages API response body, as the server would send it.
 
     Parameters
@@ -30,12 +32,16 @@ def message_json(text: str, stop_reason: str = "end_turn") -> dict[str, object]:
         Text of the answer block, i.e. the JSON the model produced.
     stop_reason : str, default "end_turn"
         Why the model stopped, e.g. ``"max_tokens"`` or ``"refusal"``.
+    cache_read : int, default 0
+        Prompt tokens served from the cache.
+    cache_write : int, default 0
+        Prompt tokens written to the cache.
 
     Returns
     -------
     dict[str, object]
         Body with an empty thinking block before the text block, as Opus 5.5
-        returns it, and fixed usage: 1,000 input and 200 output tokens.
+        returns it, and usage of 1,000 uncached input and 200 output tokens.
     """
     return {
         "id": "msg_test",
@@ -52,8 +58,8 @@ def message_json(text: str, stop_reason: str = "end_turn") -> dict[str, object]:
         "usage": {
             "input_tokens": 1000,
             "output_tokens": 200,
-            "cache_read_input_tokens": 0,
-            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": cache_read,
+            "cache_creation_input_tokens": cache_write,
         },
     }
 
@@ -104,7 +110,10 @@ class TestLLMClient:
     """Parsing, retries, output checks and logging of ``LLMClient.parse``."""
 
     async def test_returns_parsed_instance_and_sends_settings(self) -> None:
-        """A valid answer comes back as ``Label``; system and effort reach the API."""
+        """A valid answer comes back as ``Label``; system and effort reach the API.
+
+        The system prompt goes out as one text block with a cache breakpoint.
+        """
         calls: list[httpx2.Request] = []
 
         def handler(request: httpx2.Request) -> httpx2.Response:
@@ -115,7 +124,9 @@ class TestLLMClient:
 
         assert result == Label(category="bug", confidence=0.9)
         body = json.loads(calls[0].content)
-        assert body["system"] == "Classify."
+        assert body["system"] == [
+            {"type": "text", "text": "Classify.", "cache_control": {"type": "ephemeral"}}
+        ]
         assert body["output_config"]["effort"] == "low"
         assert body["output_config"]["format"]["type"] == "json_schema"
 
@@ -215,3 +226,29 @@ class TestLLMClient:
             await llm.parse(system="s", prompt="p", schema=Label)
 
         assert llm.total_cost_usd == pytest.approx(0.016)
+
+    async def test_cost_and_log_include_cache_tokens(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Cache reads bill at $0.20 and writes at 1.25x input; both are logged.
+
+        Cost: 1,000 in x $4 + 200 out x $20 + 1,000 read x $0.20
+        + 1,000 written x $5 per million tokens = $0.0132.
+
+        Parameters
+        ----------
+        caplog : pytest.LogCaptureFixture
+            Captures log records emitted during the test.
+        """
+        caplog.set_level(logging.INFO, logger="review_river.llm")
+
+        def handler(request: httpx2.Request) -> httpx2.Response:
+            body = message_json(VALID_ANSWER, cache_read=1000, cache_write=1000)
+            return httpx2.Response(200, json=body)
+
+        llm = make_llm(handler)
+        await llm.parse(system="s", prompt="p", schema=Label)
+
+        assert llm.total_cost_usd == pytest.approx(0.0132)
+        assert "cache_read=1000" in caplog.text
+        assert "cache_write=1000" in caplog.text

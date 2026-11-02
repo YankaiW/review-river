@@ -27,7 +27,7 @@ check: lint typecheck test  ## Everything CI runs: lint, typecheck, test
 run:  ## Start the API with auto-reload on http://127.0.0.1:8000
 	uv run uvicorn review_river.api:app --reload
 
-smoke:  ## Compare models on scripts/samples.jsonl (real API calls, ~$0.15)
+smoke:  ## Compare models on scripts/samples.jsonl (real API calls, ~$0.05)
 	uv run python scripts/smoke_llm.py
 
 clean:  ## Remove caches
