@@ -74,6 +74,12 @@ class LLMClient:
     http_client : httpx2.AsyncClient or None, optional
         HTTP client to use instead of the SDK default. Tests pass one built on
         ``httpx2.MockTransport`` so no request reaches the network.
+
+    Attributes
+    ----------
+    total_cost_usd : float
+        Running cost of every billed call since construction, including
+        answers later rejected for ``stop_reason``.
     """
 
     def __init__(
@@ -94,6 +100,7 @@ class LLMClient:
         )
         self._model = model
         self._effort: Literal["low", "medium", "high"] = effort
+        self.total_cost_usd = 0.0
 
     async def parse[T: BaseModel](
         self, *, system: str, prompt: str, schema: type[T], max_tokens: int = 1024
@@ -152,6 +159,8 @@ class LLMClient:
             ) from e
 
         latency_ms = (time.perf_counter() - start) * 1000
+        cost = _cost_usd(self._model, response.usage)
+        self.total_cost_usd += cost
         logger.info(
             (
                 "llm_call model=%s in=%d out=%d cache_read=%d latency_ms=%.0f "
@@ -162,7 +171,7 @@ class LLMClient:
             response.usage.output_tokens,
             response.usage.cache_read_input_tokens or 0,
             latency_ms,
-            _cost_usd(self._model, response.usage),
+            cost,
             response.stop_reason,
             response._request_id,  # pyright: ignore[reportPrivateUsage]
         )

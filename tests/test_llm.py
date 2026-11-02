@@ -201,3 +201,17 @@ class TestLLMClient:
         assert "out=200" in caplog.text
         assert "cost_usd=0.008000" in caplog.text
         assert "request_id=req_123" in caplog.text
+
+    async def test_total_cost_counts_rejected_answers(self) -> None:
+        """``total_cost_usd`` sums every billed call, a refused one included."""
+        answers = [message_json(VALID_ANSWER), message_json(VALID_ANSWER, "refusal")]
+
+        def handler(request: httpx2.Request) -> httpx2.Response:
+            return httpx2.Response(200, json=answers.pop(0))
+
+        llm = make_llm(handler)
+        await llm.parse(system="s", prompt="p", schema=Label)
+        with pytest.raises(LLMOutputError):
+            await llm.parse(system="s", prompt="p", schema=Label)
+
+        assert llm.total_cost_usd == pytest.approx(0.016)
