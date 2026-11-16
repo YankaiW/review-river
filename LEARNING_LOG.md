@@ -44,3 +44,19 @@ Break-it, shared client vs a new client per request: 50 concurrent `/classify` r
 | new per request, never closed | 1.67 s | 50 × 200 |
 
 - ~110 ms (7%) more per request: a new TCP + TLS handshake and HTTP client every time. Small next to model latency; the stronger case for one client is bounded sockets and no unclosed clients piling up. One run per arm, so the gap is indicative.
+
+## W3: Just enough internals (in progress)
+
+Tokens per language and the system prompt, Haiku 5.5, `count_tokens` (free), a 9-token message overhead subtracted:
+
+| text | chars | tokens | tokens/char | vs English |
+|---|---|---|---|---|
+| English review | 107 | 32 | 0.30 | 1.00 |
+| German, same review | 129 | 65 | 0.50 | 2.03 |
+| Chinese, same review | 36 | 40 | 1.11 | 1.25 |
+| English + 6 emoji | 73 | 40 | 0.55 | 1.25 |
+
+- Tokens per character misleads across scripts: Chinese has the most per character, but German costs the most for the same content (longer sentence, words split into more pieces). Compare tokens for the same content. One sentence per language, so the ratios are indicative.
+- System prompt: 959 tokens alone, 1,591 with the output schema, so the schema adds 632 (~40% of the prompt). `transform_schema(LLMLabel)` shows why: the `LLMLabel` and `Category` docstrings are sent as schema descriptions, so the model reads them on every call, and editing one changes the prompt and invalidates the cache.
+- 1,591 counted vs ~1,474 billed (W2 cache writes): `count_tokens` is an estimate; billed `usage` is the ground truth.
+- Opus 5.5 gives identical counts on these texts, so the two models tokenize them the same way.
