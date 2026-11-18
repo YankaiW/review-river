@@ -60,3 +60,23 @@ Tokens per language and the system prompt, Haiku 5.5, `count_tokens` (free), a 9
 - System prompt: 959 tokens alone, 1,591 with the output schema, so the schema adds 632 (~40% of the prompt). `transform_schema(LLMLabel)` shows why: the `LLMLabel` and `Category` docstrings are sent as schema descriptions, so the model reads them on every call, and editing one changes the prompt and invalidates the cache.
 - 1,591 counted vs ~1,474 billed (W2 cache writes): `count_tokens` is an estimate; billed `usage` is the ground truth.
 - Opus 5.5 gives identical counts on these texts, so the two models tokenize them the same way.
+
+Latency model, Haiku 5.5, thinking off, no cache, sequential calls, 3 per point (means; the 1.5K point drops one call that returned 0 tokens):
+
+| sweep | input tokens | output tokens | latency ms |
+|---|---|---|---|
+| input | ~1,570 | 4 | 1,213 |
+| input | ~15,510 | 4 | 1,240 |
+| input | ~77,380 | 4 | 1,881 |
+| output | 21 | ~83 | 1,116 |
+| output | 21 | ~440 | 3,525 |
+| output | 21 | ~1,266 | 9,062 |
+
+Fit `latency_ms ≈ a + b·input + c·output` (all 18 calls / without the 0-token call):
+
+- `a` ≈ 800 / 849 ms fixed per call; `b` ≈ 14.2 / 13.5 ms per 1K input tokens; `c` ≈ 6.47 / 6.42 ms per output token (~155 tokens/s).
+- `c / b` ≈ 456 / 477: in time, one output token costs about as much as ~460 input tokens. Prediction: _(add yours)_.
+- Price ratio is only 5×. Prefill keeps the GPU busy but runs in parallel, so it is short in wall time; each decode step serves many requests batched together. You pay for GPU work, you wait for the sequence of steps.
+- Check against W2: a classification (~1.6K in, ~60 out) predicts ~1.2 s; the W2 Haiku p50 was 1,363 ms (with some thinking).
+- The line fits loosely: the input-sweep calls sit ~+100 to +340 ms above it, the 50-word calls ~−250 ms below. Possible causes: the input sweep ran first (no shuffle), or time to first token is not linear in input. Shuffled calls or streamed TTFT would separate them.
+- One call returned 0 output tokens in 442 ms; `stop_reason` was not recorded.
