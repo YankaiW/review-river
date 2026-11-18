@@ -80,3 +80,19 @@ Fit `latency_ms ≈ a + b·input + c·output` (all 18 calls / without the 0-toke
 - Check against W2: a classification (~1.6K in, ~60 out) predicts ~1.2 s; the W2 Haiku p50 was 1,363 ms (with some thinking).
 - The line fits loosely: the input-sweep calls sit ~+100 to +340 ms above it, the 50-word calls ~−250 ms below. Possible causes: the input sweep ran first (no shuffle), or time to first token is not linear in input. Shuffled calls or streamed TTFT would separate them.
 - One call returned 0 output tokens in 442 ms; `stop_reason` was not recorded.
+
+Prompt cache vs no cache, Haiku 5.5, a ~49.7K-token system prefix (nonce first, so each round starts cold), thinking off, 3 rounds of control → write → read, sequential:
+
+| call | uncached input | cache write | cache read | ms mean / median | $ mean | vs control $ |
+|---|---|---|---|---|---|---|
+| control (no `cache_control`) | ~49,500 | 0 | 0 | 1,506 / 1,539 | 0.00495 | 1× |
+| write (breakpoint, cold) | 16 | ~49,665 | 0 | 1,627 / 1,409 | 0.00621 | 1.25× |
+| read (same prefix again) | 16 | 0 | ~49,665 | 1,183 / 1,134 | 0.00050 | 0.10× |
+
+- The cache hit in all 3 rounds. `input_tokens` is only the uncached remainder (the 16-token question); the full prompt is input + write + read.
+- Cost matches the price list exactly: a write is 1.25× and a read 0.10× of the uncached call, so the cache pays for itself on the first read (1.35× vs 2× for two calls).
+- Control matches the latency fit: a + b·49.5K + c·4 ≈ 1,543 ms predicted vs 1,506 measured.
+- A read saves ~320 ms (mean) / ~400 ms (median), about half of the ~670 ms prefill the fit predicts. A fully skipped prefill would give ≈ a ≈ 875 ms; the read takes 1,183 ms. The prompt is still uploaded and tokenized, and the stored KV for 50K tokens has to be loaded back. So a cached token costs ~half the time but a tenth of the price of an uncached one: caching is mainly a cost lever.
+- A write costs no extra time (same prefill, KV kept). The +120 ms mean comes from one 2,073 ms outlier; by median the write is faster than control. n = 3.
+- For the 1.5K-token classifier system prompt this means at most ~20 ms saved out of ~1.2 s, but those tokens get 10× cheaper (check-yourself Q5).
+- Prediction: _(add yours)_.
