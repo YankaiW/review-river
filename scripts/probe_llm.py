@@ -8,9 +8,12 @@ import argparse
 import asyncio
 import random
 import time
+import uuid
+from statistics import fmean
 
 import numpy as np
 from anthropic import AsyncAnthropic
+from anthropic.types import TextBlockParam, Usage
 
 from review_river.classifier import SYSTEM_PROMPT
 from review_river.deps import get_settings
@@ -53,6 +56,11 @@ WORDS = (
     "fun",
 )
 
+# Haiku 5.5, $ per MTok, prompts <= 100k tokens
+PRICE_IN, PRICE_WRITE, PRICE_READ, PRICE_OUT = 0.10, 0.125, 0.01, 0.50
+
+CACHE_WORDS = 32_000  # ~50K tokens, under the 100K price tier
+
 
 def filler(n_words: int, seed: int) -> str:
     """Return ``n_words`` random common words, about one token each.
@@ -81,6 +89,18 @@ def fit_latency(rows: list[tuple[int, int, float]]) -> tuple[float, float, float
     coef = np.linalg.lstsq(x, y, rcond=None)[0]
     a, b, c = (float(v) for v in coef)
     return a, b, c
+
+
+def call_cost(usage: Usage) -> float:
+    """Return the $ cost of one call from its ``usage``."""
+    write_cache = usage.cache_creation_input_tokens or 0
+    read_cache = usage.cache_read_input_tokens or 0
+    return (
+        usage.input_tokens * PRICE_IN
+        + write_cache * PRICE_WRITE
+        + read_cache * PRICE_READ
+        + usage.output_tokens * PRICE_OUT
+    ) / 1e6
 
 
 def make_client() -> AsyncAnthropic:
@@ -197,10 +217,119 @@ async def probe_latency(client: AsyncAnthropic) -> None:
     print(f"c / b = {c / b:.0f}")
 
 
+async def cached_call(client: AsyncAnthropic, prefix: str, cache: bool) -> tuple[Usage, float]:
+    """Send ``prefix`` as the system prompt with a fixed short question, and time it.
+
+    Everything except ``prefix`` and ``cache`` is fixed (question, ``max_tokens``,
+    thinking off), so calls differ only in whether the prefix is cached.
+
+    Parameters
+    ----------
+    client : AsyncAnthropic
+        Client built by ``make_client`` (no retries).
+    prefix : str
+        The whole system prompt. Start it with a nonce so a fresh prefix can
+        never hit a cache entry left by an earlier run.
+    cache : bool
+        If True, put a 5-minute ``cache_control`` breakpoint at the end of the
+        prefix: the first such call writes the cache, a repeat within 5 minutes
+        reads it.
+
+    Returns
+    -------
+    tuple of (Usage, float)
+        The full ``usage`` (including ``cache_creation_input_tokens`` and
+        ``cache_read_input_tokens``) and the wall time of the call in ms.
+    """
+    block: TextBlockParam = {"type": "text", "text": prefix}
+    if cache:
+        block["cache_control"] = {"type": "ephemeral"}
+    start = time.perf_counter()
+    resp = await client.messages.create(
+        model=MODEL,
+        max_tokens=5,
+        system=[block],
+        messages=[{"role": "user", "content": "Reply with exactly: OK"}],
+        thinking={"type": "disabled"},
+    )
+    latency_ms = (time.perf_counter() - start) * 1000
+    return resp.usage, latency_ms
+
+
+def print_header() -> None:
+    """Print the column names for ``print_row``, with the same widths."""
+    print(f"{'label':<8} {'input':>6} {'write':>6} {'read':>6} {'out':>4} {'ms':>6} {'$':>9}")
+
+
+def print_row(label: str, usage: Usage, ms: float) -> None:
+    """Print one call: uncached input, cache write, cache read, output, ms and $.
+
+    ``input`` is only the uncached remainder; the full prompt is
+    ``input + write + read``.
+    """
+    write_tokens = usage.cache_creation_input_tokens or 0
+    read_tokens = usage.cache_read_input_tokens or 0
+    print(
+        f"{label:<8} {usage.input_tokens:>6} {write_tokens:>6} {read_tokens:>6} "
+        f"{usage.output_tokens:>4} {ms:>6.0f} {call_cost(usage):>9.5f}"
+    )
+
+
+async def probe_cache(client: AsyncAnthropic) -> None:
+    """Compare an uncached prefix with a cache write and a cache read.
+
+    Runs a discarded warm-up call, then 3 rounds on ``MODEL``, one call at a
+    time. Each round builds two fresh ~50K-token prefixes (``CACHE_WORDS`` of
+    filler, each starting with its own nonce) and sends:
+
+    - ``control``: one prefix with no ``cache_control``, plain prefill;
+    - ``write``: the other prefix with a breakpoint, which writes the cache;
+    - ``read``: the same prefix again, which should read it.
+
+    Prints each call, flags a ``read`` that missed the cache, then the mean
+    latency and cost per label.
+
+    Parameters
+    ----------
+    client : AsyncAnthropic
+        Client built by ``make_client`` (no retries).
+    """
+    # 1. Warm-up: pays the connection setup; result thrown away
+    await timed_call(client, "Reply with exactly: OK", max_tokens=5)
+
+    # 2. Somewhere to collect results per label:
+    results: dict[str, list[tuple[float, float]]] = {"control": [], "write": [], "read": []}
+
+    print_header()
+    for _ in range(3):
+        # a. Two fresh prefixes, each starting with its own nonce:
+        control_prefix = f"{uuid.uuid4().hex}\n" + filler(CACHE_WORDS, seed=0)
+        cached_prefix = f"{uuid.uuid4().hex}\n" + filler(CACHE_WORDS, seed=1)
+
+        # b. Three calls in order. For each one: await cached_call(...)
+        for label, prefix, cache in (
+            ("control", control_prefix, False),
+            ("write", cached_prefix, True),
+            ("read", cached_prefix, True),
+        ):
+            usage, ms = await cached_call(client, prefix, cache)
+            print_row(label, usage, ms)
+            if label == "read" and not usage.cache_read_input_tokens:
+                print(" ^ cache MISS")
+            results[label].append((ms, call_cost(usage)))
+
+    print()
+    print(f"{'mean':<8} {'ms':>6} {'$':>9}")
+    for label, rows in results.items():
+        ms_mean = fmean([r[0] for r in rows])
+        cost_mean = fmean([r[1] for r in rows])
+        print(f"{label:<8} {ms_mean:>6.0f} {cost_mean:>9.5f}")
+
+
 async def main() -> None:
     """Parse the step name and run it."""
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("step", choices=["tokens", "latency"])
+    parser.add_argument("step", choices=["tokens", "latency", "cache"])
     args = parser.parse_args()
     client = make_client()
     try:
@@ -208,6 +337,8 @@ async def main() -> None:
             await probe_tokens(client=client)
         elif args.step == "latency":
             await probe_latency(client=client)
+        elif args.step == "cache":
+            await probe_cache(client=client)
     finally:
         await client.close()
 
