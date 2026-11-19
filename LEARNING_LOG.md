@@ -96,3 +96,17 @@ Prompt cache vs no cache, Haiku 5.5, a ~49.7K-token system prefix (nonce first, 
 - A write costs no extra time (same prefill, KV kept). The +120 ms mean comes from one 2,073 ms outlier; by median the write is faster than control. n = 3.
 - For the 1.5K-token classifier system prompt this means at most ~20 ms saved out of ~1.2 s, but those tokens get 10× cheaper (check-yourself Q5).
 - Prediction: _(add yours)_.
+
+Run-to-run stability, `smoke_llm.py --runs 3`: 20 labelled reviews × 3 runs per model, sequential, prompt cached, default settings (10 s timeout, 2 retries):
+
+| model | accuracy per run | errors per run | agree (same label in all 3) | Δconf mean / max | $ per 1K reviews |
+|---|---|---|---|---|---|
+| Opus 5.5 | 95% / 90% / 95% | 1 / 2 / 1 | 18/20 | 0.01 / 0.10 | 1.97 / 1.51 / 1.61 |
+| Haiku 5.5 | 100% / 100% / 100% | 0 / 0 / 0 | 20/20 | 0.05 / 0.25 | 0.06 / 0.05 / 0.05 |
+
+- No label flips: every call that answered gave the same label in all 3 runs, on both models, and every answer was correct. Opus's 18/20 and 90–95% come only from failed calls ("frame rate on Mac": ERR / ERR / performance; "What a game!": other / ERR / ERR). `agree` mixes flips and errors; splitting them would show 0 flips, 4 errors.
+- Sampling can't be set on these models, but on a clear label policy it doesn't change the answer. The variation shows up in confidence, and only on reviews already rated low: Opus "cannot be played on Mac" 0.70 / 0.60 / 0.70, Haiku "laptop is very hot" 0.60 / 0.45 / 0.70. Confident answers (≥ 0.9) barely move. Confidence comes in 0.05 steps: a number the model writes, stable enough to rank by, not a calibrated probability.
+- The errors are most likely timeouts: the failed attempts got no HTTP response (httpx logs one for every 429/5xx), and the one retry that succeeded took 17.4 s ≈ a 10 s timeout + backoff + a ~7 s second attempt. Opus's typical call takes ~1.6 s but its slow tail reaches 7–17 s; Haiku's slowest was 2.2 s. A failed review waits ~30 s (3 attempts × 10 s) before `ClassifierUnavailable`. Not confirmed: `classifier.py` wraps the `APIError` and the smoke script never prints `e.__cause__` (Session 4 debt).
+- Open for Session 4: at 10 s, ~2–3% of Opus calls fail here after a 30 s wait. Options: a longer timeout, fail fast with fewer retries, or fall back to Haiku on a timeout.
+- Cost: run 1 includes the cache writes; ~$0.11 for all 120 calls.
+- Prediction: _(add yours)_.
