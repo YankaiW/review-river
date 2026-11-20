@@ -110,3 +110,19 @@ Run-to-run stability, `smoke_llm.py --runs 3`: 20 labelled reviews × 3 runs per
 - Open for Session 4: at 10 s, ~2–3% of Opus calls fail here after a 30 s wait. Options: a longer timeout, fail fast with fewer retries, or fall back to Haiku on a timeout.
 - Cost: run 1 includes the cache writes; ~$0.11 for all 120 calls.
 - Prediction: _(add yours)_.
+
+Break-it: a prompt over the context window, Haiku 5.5, `probe_llm.py overflow` then `/classify` (`classifier_backend=llm`). Free: a rejected request is not billed.
+
+| layer | what happened |
+|---|---|
+| Models API | `max_input_tokens` = 1,000,000 |
+| `count_tokens` | returned 1,100,373 (1.10× the limit), no error |
+| `messages.create`, SDK `max_retries=2` | `400 BadRequestError`, `invalid_request_error`: "prompt is too long: 1100396 tokens > 1000000 maximum", after 933 ms; one attempt, no retry |
+| `POST /classify` (service: 10 s timeout, 2 retries) | `503 Service Unavailable`, `Retry-After: 5`, `{"detail": "classifier unavailable, try again later"}`, after 1.58 s |
+
+- `count_tokens` counts, it doesn't check: it returns the size of an over-limit prompt without an error, so a pre-check has to compare against `max_input_tokens` itself. Its count was 23 tokens under the real one (1,100,373 vs 1,100,396), so it is an estimate here too (same as the system prompt in Piece 1).
+- The API enforces the limit by token count and answers fast: ~4.5 MB uploaded and 1.1M tokens counted in under 1 s, faster than a normal 1.5K-token classification, because nothing is generated.
+- The SDK does not retry a 400: it only retries 408/409/429/5xx and connection errors, since a bad request fails the same way every time.
+- The service gets it wrong. `Review` has no length limit, so the whole text goes to Claude; `classifier.py` wraps every `APIError` (the 400 included) in `ClassifierUnavailable`, and `api.py` turns that into 503 + `Retry-After: 5`. A client that obeys it retries an input that can never succeed, uploading 4.5 MB each time; monitoring sees an outage; the caller never learns the input is the problem (the cause is only in the server log).
+- Session 4: (1) cap `Review.text` (the samples are all < 200 chars; ~10–20K chars leaves room) so FastAPI returns 422 before any provider call; (2) map provider errors by cause: an input the provider rejects → 4xx to the caller, a wrong key/model/parameter (401/403/404/400) → 500, only 429/5xx/timeouts → 503 with `Retry-After`.
+- Prediction: _(add yours)_.
