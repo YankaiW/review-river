@@ -6,13 +6,14 @@ Run one step at a time, e.g. ``uv run python scripts/probe_llm.py tokens``.
 
 import argparse
 import asyncio
+import logging
 import random
 import time
 import uuid
 from statistics import fmean
 
 import numpy as np
-from anthropic import AsyncAnthropic
+from anthropic import APIConnectionError, APIStatusError, AsyncAnthropic
 from anthropic.types import TextBlockParam, Usage
 
 from review_river.classifier import SYSTEM_PROMPT
@@ -103,11 +104,22 @@ def call_cost(usage: Usage) -> float:
     ) / 1e6
 
 
-def make_client() -> AsyncAnthropic:
-    """Build a client with no retries, so retries never distort a measurement."""
+def make_client(max_retries: int = 0) -> AsyncAnthropic:
+    """Build a client with a 120 s timeout and no retries by default.
+
+    Measurements keep ``max_retries=0`` so a retry never distorts a latency.
+    The overflow probe passes 2, the SDK default, to see whether the SDK
+    retries an error.
+
+    Parameters
+    ----------
+    max_retries : int
+        Retries the SDK makes on retryable errors (408/409/429/5xx and
+        connection errors, timeouts included).
+    """
     key = get_settings().anthropic_api_key
     assert key is not None, "set REVIEW_RIVER_ANTHROPIC_API_KEY in .env"
-    return AsyncAnthropic(api_key=key.get_secret_value(), timeout=120, max_retries=0)
+    return AsyncAnthropic(api_key=key.get_secret_value(), timeout=120, max_retries=max_retries)
 
 
 async def count_user(client: AsyncAnthropic, text: str) -> int:
@@ -326,12 +338,64 @@ async def probe_cache(client: AsyncAnthropic) -> None:
         print(f"{label:<8} {ms_mean:>6.0f} {cost_mean:>9.5f}")
 
 
+async def probe_overflow(client: AsyncAnthropic) -> None:
+    """Send a prompt about 10% over ``MODEL``'s context window and see what breaks.
+
+    Reads the limit from the Models API, builds filler about 1.1 times that size
+    and counts it with ``count_tokens`` (free). Stops if the prompt is not over
+    the limit: a prompt that fits would be a real ~1M-token call, billed at
+    Haiku's >100K-token rate (about $0.50). A rejected request is not billed.
+
+    Parameters
+    ----------
+    client : AsyncAnthropic
+        Client built by ``make_client``.
+    """
+    logging.basicConfig(level=logging.INFO)
+    # Context window from the Models API, not a hard-coded number
+    info = await client.models.retrieve(MODEL)
+    limit = info.max_input_tokens
+    assert limit is not None
+    # Printed first, so it survives if count_tokens rejects the prompt
+    print(f"limit: {limit:>9,} tokens")
+
+    # Filler is ~1.55 tokens per word (latency sweep), so this is ~1.1 times the limit
+    n_words = int(limit * 1.1 / 1.55)
+    text = filler(n_words, seed=0)
+    # Free, but it may itself refuse an over-limit prompt (prediction 4)
+    user_input_tokens = await count_user(client, text)
+    print(f"prompt: {user_input_tokens:>9,} tokens ({user_input_tokens / limit:.2f}x the limit)")
+    # Guard: never send a prompt that fits, since that one would be billed
+    if user_input_tokens <= limit:
+        print("not over the limit, stopping")
+        return
+
+    start = time.perf_counter()
+    try:
+        await client.messages.create(
+            model=MODEL,
+            max_tokens=5,
+            messages=[{"role": "user", "content": text}],
+            thinking={"type": "disabled"},
+        )
+    except APIStatusError as e:
+        ms = (time.perf_counter() - start) * 1000
+        print(f"{type(e).__name__} {e.status_code} after {ms:.0f} ms")
+        print(f"  message:    {e.message}")
+        print(f"  request-id: {e.response.headers.get('request-id')}")
+    except APIConnectionError as e:
+        ms = (time.perf_counter() - start) * 1000
+        print(f"{type(e).__name__} {ms:.0f} ms")
+    else:
+        print("NOT rejected: this call was billed")
+
+
 async def main() -> None:
     """Parse the step name and run it."""
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("step", choices=["tokens", "latency", "cache"])
+    parser.add_argument("step", choices=["tokens", "latency", "cache", "overflow"])
     args = parser.parse_args()
-    client = make_client()
+    client = make_client(max_retries=2 if args.step == "overflow" else 0)
     try:
         if args.step == "tokens":
             await probe_tokens(client=client)
@@ -339,6 +403,8 @@ async def main() -> None:
             await probe_latency(client=client)
         elif args.step == "cache":
             await probe_cache(client=client)
+        elif args.step == "overflow":
+            await probe_overflow(client=client)
     finally:
         await client.close()
 
