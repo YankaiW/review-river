@@ -169,6 +169,56 @@ class TestLLMClient:
         with pytest.raises(LLMOutputError):
             await make_llm(handler).parse(system="s", prompt="p", schema=Label)
 
+    async def test_truncated_json_is_logged_and_billed(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """A cut-off answer is logged and counted before ``LLMOutputError``.
+
+        The call was billed, so it must show up in the ``llm_call`` log and in
+        ``total_cost_usd`` (1,000 x $4 + 200 x $20 per million = $0.008),
+        even though the answer is unusable.
+
+        Parameters
+        ----------
+        caplog : pytest.LogCaptureFixture
+            Captures log records emitted during the test.
+        """
+        caplog.set_level(logging.INFO, logger="review_river.llm")
+
+        def handler(request: httpx2.Request) -> httpx2.Response:
+            return httpx2.Response(200, json=message_json('{"category": "bu', "max_tokens"))
+
+        llm = make_llm(handler)
+        with pytest.raises(LLMOutputError):
+            await llm.parse(system="s", prompt="p", schema=Label)
+
+        assert "stop=max_tokens" in caplog.text  # the call was logged
+        assert llm.total_cost_usd == pytest.approx(0.008)  # and counted
+
+    async def test_invalid_json_with_end_turn_is_logged_and_raises(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """A finished answer that fails the schema is logged, then rejected.
+
+        ``stop_reason`` is ``end_turn`` but ``confidence`` is missing, so the
+        error comes from local validation, not from the stop-reason check.
+
+        Parameters
+        ----------
+        caplog : pytest.LogCaptureFixture
+            Captures log records emitted during the test.
+        """
+        caplog.set_level(logging.INFO, logger="review_river.llm")
+
+        def handler(request: httpx2.Request) -> httpx2.Response:
+            return httpx2.Response(200, json=message_json('{"category": "bug"}'))
+
+        llm = make_llm(handler)
+        with pytest.raises(LLMOutputError, match="does not match the schema"):
+            await llm.parse(system="s", prompt="p", schema=Label)
+
+        assert "llm_call" in caplog.text
+
     async def test_refusal_raises_output_error(self) -> None:
         """Valid JSON with ``stop_reason="refusal"`` is still rejected."""
 

@@ -5,7 +5,7 @@ import time
 from typing import Literal
 
 import httpx2
-from anthropic import AsyncAnthropic
+from anthropic import AsyncAnthropic, transform_schema
 from anthropic.types import Usage
 from pydantic import BaseModel, ValidationError
 
@@ -107,9 +107,13 @@ class LLMClient:
     ) -> T:
         """Ask Claude for one answer that validates against ``schema``.
 
-        The SDK sends ``schema`` as a structured-output format, so the model
-        can only produce JSON in that shape; pydantic then validates the reply
-        locally, including constraints the API does not enforce (e.g. ``ge``).
+        ``schema`` goes out as a structured-output format
+        (``output_config.format``), so the model can only produce JSON in that
+        shape. Every answer that comes back is logged and added to
+        ``total_cost_usd`` first; only then are ``stop_reason`` and the JSON
+        checked, so a rejected answer is still logged and counted. Pydantic
+        validates the reply locally, including constraints the API does not
+        enforce (e.g. ``ge``).
 
         Parameters
         ----------
@@ -132,33 +136,30 @@ class LLMClient:
         Raises
         ------
         LLMOutputError
-            If the call succeeded but gave no usable answer: the JSON fails
-            validation, ``stop_reason`` is not ``"end_turn"`` (``max_tokens``,
-            ``refusal``), or the response holds no text block.
+            If the call succeeded but gave no usable answer: ``stop_reason``
+            is not ``"end_turn"`` (``max_tokens``, ``refusal``), the response
+            holds no text block, or the JSON fails validation against
+            ``schema``. The call is logged and counted before this is raised.
         anthropic.APIError
             Passed through unchanged after the SDK's retries (connection
             errors, timeouts, 4xx/5xx).
         """
         start = time.perf_counter()
-        try:
-            response = await self._client.messages.parse(
-                model=self._model,
-                max_tokens=max_tokens,
-                messages=[
-                    {
-                        "role": "user",
-                        "content": prompt,
-                    }
-                ],
-                output_config={"effort": self._effort},
-                output_format=schema,
-                system=[{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}],
-            )
-        except ValidationError as e:
-            # Not logged: the SDK raised inside parse(), so there is no response (usage, request id)
-            raise LLMOutputError(
-                "Output is not valid JSON for the schema (cut off by max_tokens?)"
-            ) from e
+        response = await self._client.messages.create(
+            model=self._model,
+            max_tokens=max_tokens,
+            messages=[
+                {
+                    "role": "user",
+                    "content": prompt,
+                }
+            ],
+            output_config={
+                "effort": self._effort,
+                "format": {"type": "json_schema", "schema": transform_schema(schema)},
+            },
+            system=[{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}],
+        )
 
         latency_ms = (time.perf_counter() - start) * 1000
         cost = _cost_usd(self._model, response.usage)
@@ -181,10 +182,15 @@ class LLMClient:
 
         if response.stop_reason != "end_turn":
             raise LLMOutputError(f"stop_reason={response.stop_reason}")
-        if response.parsed_output is None:
+
+        text = next((b.text for b in response.content if b.type == "text"), None)
+        if text is None:
             raise LLMOutputError("no text block in the response")
 
-        return response.parsed_output
+        try:
+            return schema.model_validate_json(text)
+        except ValidationError as e:
+            raise LLMOutputError("output does not match the schema") from e
 
     async def close(self) -> None:
         """Close the underlying HTTP connections; call once on shutdown."""
