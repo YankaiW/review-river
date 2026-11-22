@@ -5,11 +5,10 @@ import re
 from collections.abc import Mapping
 from typing import Protocol
 
-from anthropic import APIError
 from pydantic import BaseModel, Field
 
 from review_river.domain import Category, Classification, Review
-from review_river.llm import LLMError
+from review_river.llm import LLMError, LLMUnavailable
 
 logger = logging.getLogger(__name__)
 
@@ -271,10 +270,10 @@ class LLMClassifier:
                 schema=LLMLabel,
                 max_tokens=self._max_tokens,
             )
+        except LLMUnavailable as e:
+            raise ClassifierUnavailable("LLM provider call failed") from e
         except LLMError as e:
             raise ClassifierUnavailable("LLM gave no usable answer") from e
-        except APIError as e:
-            raise ClassifierUnavailable("LLM provider call failed") from e
 
         logger.info(
             "llm_label category=%s confidence=%.2f reason=%r",

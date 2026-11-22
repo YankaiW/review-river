@@ -35,13 +35,19 @@ line-length = 100          # max characters per line (default 88 is a bit tight)
 target-version = "py312"   # lets ruff suggest modern 3.12 syntax
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "B", "UP", "SIM", "RUF", "D"]
+select = ["E", "F", "I", "B", "UP", "SIM", "RUF", "D", "TID251"]
+
+[tool.ruff.lint.flake8-tidy-imports.banned-api]
+"anthropic".msg = "Import anthropic only in review_river/llm.py; use LLMClient and the LLM* errors."
 
 [tool.ruff.lint.pydocstyle]
 convention = "numpy"
 
 [tool.ruff.lint.per-file-ignores]
 "tests/*" = ["D"]
+"src/review_river/llm.py" = ["TID251"]
+"tests/test_llm.py" = ["TID251"]
+"scripts/*" = ["TID251"]
 
 [tool.pyright]
 include = ["src", "tests", "scripts"] # what to type-check

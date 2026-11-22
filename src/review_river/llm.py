@@ -5,7 +5,7 @@ import time
 from typing import Literal
 
 import httpx2
-from anthropic import AsyncAnthropic, transform_schema
+from anthropic import APIError, AsyncAnthropic, transform_schema
 from anthropic.types import Usage
 from pydantic import BaseModel, ValidationError
 
@@ -51,6 +51,10 @@ class LLMError(Exception):
 
 class LLMOutputError(LLMError):
     """The model answered, but the answer holds no usable structured output."""
+
+
+class LLMUnavailable(LLMError):
+    """The provider call failed, after the SDK's retries."""
 
 
 class LLMClient:
@@ -140,26 +144,30 @@ class LLMClient:
             is not ``"end_turn"`` (``max_tokens``, ``refusal``), the response
             holds no text block, or the JSON fails validation against
             ``schema``. The call is logged and counted before this is raised.
-        anthropic.APIError
-            Passed through unchanged after the SDK's retries (connection
-            errors, timeouts, 4xx/5xx).
+        LLMUnavailable
+            If the provider call failed after the SDK's retries (connection
+            errors, timeouts, 4xx/5xx). The ``anthropic.APIError`` is chained
+            as ``__cause__``; callers never see a provider type.
         """
         start = time.perf_counter()
-        response = await self._client.messages.create(
-            model=self._model,
-            max_tokens=max_tokens,
-            messages=[
-                {
-                    "role": "user",
-                    "content": prompt,
-                }
-            ],
-            output_config={
-                "effort": self._effort,
-                "format": {"type": "json_schema", "schema": transform_schema(schema)},
-            },
-            system=[{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}],
-        )
+        try:
+            response = await self._client.messages.create(
+                model=self._model,
+                max_tokens=max_tokens,
+                messages=[
+                    {
+                        "role": "user",
+                        "content": prompt,
+                    }
+                ],
+                output_config={
+                    "effort": self._effort,
+                    "format": {"type": "json_schema", "schema": transform_schema(schema)},
+                },
+                system=[{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}],
+            )
+        except APIError as e:
+            raise LLMUnavailable(f"provider call failed: {type(e).__name__}") from e
 
         latency_ms = (time.perf_counter() - start) * 1000
         cost = _cost_usd(self._model, response.usage)

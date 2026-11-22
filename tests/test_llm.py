@@ -9,7 +9,7 @@ import pytest
 from anthropic import BadRequestError, DefaultAsyncHttpxClient
 from pydantic import BaseModel
 
-from review_river.llm import LLMClient, LLMOutputError
+from review_river.llm import LLMClient, LLMOutputError, LLMUnavailable
 
 Handler = Callable[[httpx2.Request], httpx2.Response]
 
@@ -149,16 +149,21 @@ class TestLLMClient:
         assert len(calls) == 2
 
     async def test_bad_request_is_not_retried(self) -> None:
-        """A 400 propagates as ``BadRequestError`` after exactly one request."""
+        """A 400 becomes ``LLMUnavailable`` after exactly one request, cause kept.
+
+        The SDK does not retry a 400; ``LLMClient`` wraps it so callers only see
+        ``LLM*`` errors, with the ``BadRequestError`` chained as ``__cause__``.
+        """
         calls: list[httpx2.Request] = []
 
         def handler(request: httpx2.Request) -> httpx2.Response:
             calls.append(request)
             return httpx2.Response(400, json=error_json("invalid_request_error"))
 
-        with pytest.raises(BadRequestError):
+        with pytest.raises(LLMUnavailable) as exc_info:
             await make_llm(handler).parse(system="s", prompt="p", schema=Label)
         assert len(calls) == 1
+        assert isinstance(exc_info.value.__cause__, BadRequestError)
 
     async def test_truncated_json_raises_output_error(self) -> None:
         """JSON cut off by ``max_tokens`` fails validation and maps to ``LLMOutputError``."""

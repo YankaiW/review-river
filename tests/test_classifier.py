@@ -2,9 +2,7 @@
 
 import logging
 
-import httpx2
 import pytest
-from anthropic import APIConnectionError
 from pydantic import BaseModel
 
 from review_river.classifier import (
@@ -17,7 +15,7 @@ from review_river.classifier import (
     StructuredLLM,
 )
 from review_river.domain import Category, Classification, Review
-from review_river.llm import LLMClient, LLMOutputError
+from review_river.llm import LLMClient, LLMOutputError, LLMUnavailable
 
 VALID_LABEL: dict[str, object] = {
     "reason": "mentions a crash",
@@ -172,9 +170,7 @@ class TestLLMClassifier:
         "error",
         [
             LLMOutputError("stop_reason=refusal"),
-            APIConnectionError(
-                request=httpx2.Request("POST", "https://api.anthropic.com/v1/messages")
-            ),
+            LLMUnavailable("provider call failed"),
         ],
         ids=["unusable-output", "provider-error"],
     )
