@@ -8,6 +8,10 @@ from enum import StrEnum
 
 from pydantic import BaseModel, ConfigDict, Field
 
+# Sample reviews are under 200 chars; 10K chars (~3-5K tokens) leaves room and stays
+# far below the model's 1M-token context window (W3 break-it).
+MAX_REVIEW_CHARS = 10_000
+
 
 class Category(StrEnum):
     """Topic a review is about, used to route it to the right team.
@@ -30,12 +34,15 @@ class Review(BaseModel):
     ----------
     text : str
         Review body. Surrounding whitespace is stripped before validation,
-        so empty or whitespace-only text is rejected.
+        so empty or whitespace-only text is rejected. At most
+        ``MAX_REVIEW_CHARS`` characters, so an oversized review gets a 422 at
+        the API instead of a provider call (or a provider 400).
 
     Raises
     ------
     pydantic.ValidationError
-        If ``text`` is empty after stripping.
+        If ``text`` is empty after stripping or longer than
+        ``MAX_REVIEW_CHARS``.
 
     Examples
     --------
@@ -45,7 +52,7 @@ class Review(BaseModel):
 
     model_config = ConfigDict(str_strip_whitespace=True)
 
-    text: str = Field(min_length=1)
+    text: str = Field(min_length=1, max_length=MAX_REVIEW_CHARS)
 
 
 class Classification(BaseModel):

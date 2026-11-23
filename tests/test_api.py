@@ -16,7 +16,7 @@ from pydantic import BaseModel
 from review_river.api import app
 from review_river.classifier import ClassifierUnavailable
 from review_river.deps import get_classifier, get_llm, get_settings
-from review_river.domain import Category, Classification, Review
+from review_river.domain import MAX_REVIEW_CHARS, Category, Classification, Review
 from review_river.llm import LLMClient, LLMOutputError
 
 
@@ -132,7 +132,9 @@ class TestClassifyEndpoint:
 
         assert fake.seen == [Review(text="Game crashes")]
 
-    @pytest.mark.parametrize("body", [{"text": "   "}, {}, {"text": 123}])
+    @pytest.mark.parametrize(
+        "body", [{"text": "   "}, {}, {"text": 123}, {"text": "a" * (MAX_REVIEW_CHARS + 1)}]
+    )
     def test_invalid_body_is_rejected_before_classifier(
         self, client: TestClient, fake: FakeClassifier, body: dict[str, object]
     ) -> None:

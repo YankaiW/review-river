@@ -3,7 +3,7 @@
 import pytest
 from pydantic import ValidationError
 
-from review_river.domain import Category, Classification, Review
+from review_river.domain import MAX_REVIEW_CHARS, Category, Classification, Review
 
 
 class TestReview:
@@ -14,6 +14,16 @@ class TestReview:
         review = Review(text="  Game crashes on startup ")
 
         assert review.text == "Game crashes on startup"
+
+    def test_max_edge_text_is_accepted(self) -> None:
+        """Text of exactly ``MAX_REVIEW_CHARS`` characters is accepted."""
+        review = Review(text="a" * MAX_REVIEW_CHARS)
+        assert review.text == "a" * MAX_REVIEW_CHARS
+
+    def test_over_edge_text_is_rejected(self) -> None:
+        """One character over ``MAX_REVIEW_CHARS`` is rejected."""
+        with pytest.raises(ValidationError):
+            Review(text="a" * (MAX_REVIEW_CHARS + 1))
 
     @pytest.mark.parametrize("text", ["", "   ", "\n\t"])
     def test_empty_or_blank_text_is_rejected(self, text: str) -> None:
