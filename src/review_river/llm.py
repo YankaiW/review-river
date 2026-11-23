@@ -5,7 +5,7 @@ import time
 from typing import Literal
 
 import httpx2
-from anthropic import APIError, AsyncAnthropic, transform_schema
+from anthropic import APIConnectionError, APIStatusError, AsyncAnthropic, transform_schema
 from anthropic.types import Usage
 from pydantic import BaseModel, ValidationError
 
@@ -54,7 +54,15 @@ class LLMOutputError(LLMError):
 
 
 class LLMUnavailable(LLMError):
-    """The provider call failed, after the SDK's retries."""
+    """The provider call failed temporarily, after the SDK's retries.
+
+    No response (connection error, timeout) or a retryable status (408, 409,
+    429, 5xx). A later retry can succeed.
+    """
+
+
+class LLMConfigError(LLMError):
+    """The provider rejected the request itself (4xx); retrying won't help."""
 
 
 class LLMClient:
@@ -145,9 +153,14 @@ class LLMClient:
             holds no text block, or the JSON fails validation against
             ``schema``. The call is logged and counted before this is raised.
         LLMUnavailable
-            If the provider call failed after the SDK's retries (connection
-            errors, timeouts, 4xx/5xx). The ``anthropic.APIError`` is chained
-            as ``__cause__``; callers never see a provider type.
+            If the provider call failed temporarily after the SDK's retries
+            (connection errors, timeouts, 408/409/429/5xx).
+        LLMConfigError
+            If the provider rejected the request itself (any other 4xx: bad
+            key, no permission, unknown model, invalid request). Not retried.
+
+        For both, the ``anthropic.APIError`` is chained as ``__cause__``;
+        callers never see a provider type.
         """
         start = time.perf_counter()
         try:
@@ -166,7 +179,12 @@ class LLMClient:
                 },
                 system=[{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}],
             )
-        except APIError as e:
+        except APIStatusError as e:  # the API answered with an error status
+            # Same statuses the SDK retries: temporary, so the caller may retry too
+            if e.status_code in (408, 409, 429) or e.status_code >= 500:
+                raise LLMUnavailable(f"provider call failed: {type(e).__name__}") from e
+            raise LLMConfigError(f"provider rejected the request: {type(e).__name__}") from e
+        except APIConnectionError as e:  # no answer at all: timeout or dropped
             raise LLMUnavailable(f"provider call failed: {type(e).__name__}") from e
 
         latency_ms = (time.perf_counter() - start) * 1000

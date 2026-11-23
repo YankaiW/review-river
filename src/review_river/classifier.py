@@ -8,7 +8,7 @@ from typing import Protocol
 from pydantic import BaseModel, Field
 
 from review_river.domain import Category, Classification, Review
-from review_river.llm import LLMError, LLMUnavailable
+from review_river.llm import LLMOutputError, LLMUnavailable
 
 logger = logging.getLogger(__name__)
 
@@ -259,9 +259,13 @@ class LLMClassifier:
         Raises
         ------
         ClassifierUnavailable
-            If the provider call fails (connection, timeout, 4xx/5xx after
-            retries) or the model gives no usable answer. The original error
-            is chained as ``__cause__``.
+            If the provider call failed temporarily (``LLMUnavailable``) or
+            the model gave no usable answer (``LLMOutputError``): failures a
+            retry can fix. The original error is chained as ``__cause__``.
+        LLMConfigError
+            Not wrapped: a bad key, unknown model or invalid request is a
+            configuration bug, so it propagates and the API answers 500, not
+            503.
         """
         try:
             label = await self._llm.parse(
@@ -272,7 +276,7 @@ class LLMClassifier:
             )
         except LLMUnavailable as e:
             raise ClassifierUnavailable("LLM provider call failed") from e
-        except LLMError as e:
+        except LLMOutputError as e:
             raise ClassifierUnavailable("LLM gave no usable answer") from e
 
         logger.info(

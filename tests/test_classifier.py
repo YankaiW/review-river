@@ -15,7 +15,7 @@ from review_river.classifier import (
     StructuredLLM,
 )
 from review_river.domain import Category, Classification, Review
-from review_river.llm import LLMClient, LLMOutputError, LLMUnavailable
+from review_river.llm import LLMClient, LLMConfigError, LLMOutputError, LLMUnavailable
 
 VALID_LABEL: dict[str, object] = {
     "reason": "mentions a crash",
@@ -193,6 +193,13 @@ class TestLLMClassifier:
             await LLMClassifier(FakeLLM(RuntimeError("bug in our code"))).classify(
                 Review(text="Crashes")
             )
+
+    async def test_config_error_is_not_masked(self) -> None:
+        """A config error (bad key, unknown model) propagates, so the API gives 500, not 503."""
+        with pytest.raises(LLMConfigError):
+            await LLMClassifier(
+                FakeLLM(LLMConfigError("provider rejected the request: AuthenticationError"))
+            ).classify(Review(text="Crashes"))
 
     async def test_out_of_range_confidence_is_rejected(self) -> None:
         """``confidence`` above 1 fails ``LLMLabel`` validation instead of passing through."""

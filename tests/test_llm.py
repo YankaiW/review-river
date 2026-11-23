@@ -6,10 +6,10 @@ from collections.abc import Callable
 
 import httpx2
 import pytest
-from anthropic import BadRequestError, DefaultAsyncHttpxClient
+from anthropic import APIStatusError, DefaultAsyncHttpxClient
 from pydantic import BaseModel
 
-from review_river.llm import LLMClient, LLMOutputError, LLMUnavailable
+from review_river.llm import LLMClient, LLMConfigError, LLMOutputError, LLMUnavailable
 
 Handler = Callable[[httpx2.Request], httpx2.Response]
 
@@ -148,22 +148,58 @@ class TestLLMClient:
         assert result.category == "bug"
         assert len(calls) == 2
 
-    async def test_bad_request_is_not_retried(self) -> None:
-        """A 400 becomes ``LLMUnavailable`` after exactly one request, cause kept.
+    async def test_overloaded_after_retries_is_unavailable(self) -> None:
+        """A 529 on every attempt ends as ``LLMUnavailable`` after the retries.
 
-        The SDK does not retry a 400; ``LLMClient`` wraps it so callers only see
-        ``LLM*`` errors, with the ``BadRequestError`` chained as ``__cause__``.
+        ``make_llm`` allows 2 retries, so the SDK sends 3 requests, then gives up.
         """
         calls: list[httpx2.Request] = []
 
         def handler(request: httpx2.Request) -> httpx2.Response:
             calls.append(request)
-            return httpx2.Response(400, json=error_json("invalid_request_error"))
+            return httpx2.Response(
+                529, json=error_json("overloaded_error"), headers={"retry-after-ms": "1"}
+            )
 
-        with pytest.raises(LLMUnavailable) as exc_info:
+        with pytest.raises(LLMUnavailable):
+            await make_llm(handler).parse(system="s", prompt="p", schema=Label)
+
+        assert len(calls) == 3
+
+    @pytest.mark.parametrize(
+        ("status", "error_type"),
+        [
+            (400, "invalid_request_error"),
+            (401, "authentication_error"),
+            (403, "permission_error"),
+            (404, "not_found_error"),
+        ],
+    )
+    async def test_config_errors_are_not_retried(self, status: int, error_type: str) -> None:
+        """A 400/401/403/404 becomes ``LLMConfigError`` after one request, cause kept.
+
+        The SDK does not retry these; ``LLMClient`` wraps them so callers only
+        see ``LLM*`` errors, with the ``APIStatusError`` chained as ``__cause__``.
+
+        Parameters
+        ----------
+        status : int
+            HTTP status the mocked API returns.
+        error_type : str
+            API error type that goes with ``status``.
+        """
+        calls: list[httpx2.Request] = []
+
+        def handler(request: httpx2.Request) -> httpx2.Response:
+            calls.append(request)
+            return httpx2.Response(status, json=error_json(error_type))
+
+        with pytest.raises(LLMConfigError) as exc_info:
             await make_llm(handler).parse(system="s", prompt="p", schema=Label)
         assert len(calls) == 1
-        assert isinstance(exc_info.value.__cause__, BadRequestError)
+        cause = exc_info.value.__cause__
+        assert isinstance(cause, APIStatusError)
+        assert cause.status_code == status
 
     async def test_truncated_json_raises_output_error(self) -> None:
         """JSON cut off by ``max_tokens`` fails validation and maps to ``LLMOutputError``."""
