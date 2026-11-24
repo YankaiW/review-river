@@ -5,11 +5,10 @@ import re
 from collections.abc import Mapping
 from typing import Protocol
 
-from anthropic import APIError
 from pydantic import BaseModel, Field
 
 from review_river.domain import Category, Classification, Review
-from review_river.llm import LLMError
+from review_river.llm import LLMOutputError, LLMUnavailable
 
 logger = logging.getLogger(__name__)
 
@@ -260,9 +259,13 @@ class LLMClassifier:
         Raises
         ------
         ClassifierUnavailable
-            If the provider call fails (connection, timeout, 4xx/5xx after
-            retries) or the model gives no usable answer. The original error
-            is chained as ``__cause__``.
+            If the provider call failed temporarily (``LLMUnavailable``) or
+            the model gave no usable answer (``LLMOutputError``): failures a
+            retry can fix. The original error is chained as ``__cause__``.
+        LLMConfigError
+            Not wrapped: a bad key, unknown model or invalid request is a
+            configuration bug, so it propagates and the API answers 500, not
+            503.
         """
         try:
             label = await self._llm.parse(
@@ -271,15 +274,15 @@ class LLMClassifier:
                 schema=LLMLabel,
                 max_tokens=self._max_tokens,
             )
-        except LLMError as e:
-            raise ClassifierUnavailable("LLM gave no usable answer") from e
-        except APIError as e:
+        except LLMUnavailable as e:
             raise ClassifierUnavailable("LLM provider call failed") from e
+        except LLMOutputError as e:
+            raise ClassifierUnavailable("LLM gave no usable answer") from e
 
         logger.info(
-            "llm_label category=%s confidence=%.2f reason=%r",
+            "llm_label category=%s confidence=%.2f",
             label.category,
             label.confidence,
-            label.reason,
         )
+        logger.debug("llm_reason reason=%r", label.reason)
         return Classification(category=label.category, confidence=label.confidence)

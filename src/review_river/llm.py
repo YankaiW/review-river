@@ -5,7 +5,7 @@ import time
 from typing import Literal
 
 import httpx2
-from anthropic import AsyncAnthropic
+from anthropic import APIConnectionError, APIStatusError, AsyncAnthropic, transform_schema
 from anthropic.types import Usage
 from pydantic import BaseModel, ValidationError
 
@@ -51,6 +51,18 @@ class LLMError(Exception):
 
 class LLMOutputError(LLMError):
     """The model answered, but the answer holds no usable structured output."""
+
+
+class LLMUnavailable(LLMError):
+    """The provider call failed temporarily, after the SDK's retries.
+
+    No response (connection error, timeout) or a retryable status (408, 409,
+    429, 5xx). A later retry can succeed.
+    """
+
+
+class LLMConfigError(LLMError):
+    """The provider rejected the request itself (4xx); retrying won't help."""
 
 
 class LLMClient:
@@ -107,9 +119,13 @@ class LLMClient:
     ) -> T:
         """Ask Claude for one answer that validates against ``schema``.
 
-        The SDK sends ``schema`` as a structured-output format, so the model
-        can only produce JSON in that shape; pydantic then validates the reply
-        locally, including constraints the API does not enforce (e.g. ``ge``).
+        ``schema`` goes out as a structured-output format
+        (``output_config.format``), so the model can only produce JSON in that
+        shape. Every answer that comes back is logged and added to
+        ``total_cost_usd`` first; only then are ``stop_reason`` and the JSON
+        checked, so a rejected answer is still logged and counted. Pydantic
+        validates the reply locally, including constraints the API does not
+        enforce (e.g. ``ge``).
 
         Parameters
         ----------
@@ -132,16 +148,23 @@ class LLMClient:
         Raises
         ------
         LLMOutputError
-            If the call succeeded but gave no usable answer: the JSON fails
-            validation, ``stop_reason`` is not ``"end_turn"`` (``max_tokens``,
-            ``refusal``), or the response holds no text block.
-        anthropic.APIError
-            Passed through unchanged after the SDK's retries (connection
-            errors, timeouts, 4xx/5xx).
+            If the call succeeded but gave no usable answer: ``stop_reason``
+            is not ``"end_turn"`` (``max_tokens``, ``refusal``), the response
+            holds no text block, or the JSON fails validation against
+            ``schema``. The call is logged and counted before this is raised.
+        LLMUnavailable
+            If the provider call failed temporarily after the SDK's retries
+            (connection errors, timeouts, 408/409/429/5xx).
+        LLMConfigError
+            If the provider rejected the request itself (any other 4xx: bad
+            key, no permission, unknown model, invalid request). Not retried.
+
+        For both, the ``anthropic.APIError`` is chained as ``__cause__``;
+        callers never see a provider type.
         """
         start = time.perf_counter()
         try:
-            response = await self._client.messages.parse(
+            response = await self._client.messages.create(
                 model=self._model,
                 max_tokens=max_tokens,
                 messages=[
@@ -150,15 +173,19 @@ class LLMClient:
                         "content": prompt,
                     }
                 ],
-                output_config={"effort": self._effort},
-                output_format=schema,
+                output_config={
+                    "effort": self._effort,
+                    "format": {"type": "json_schema", "schema": transform_schema(schema)},
+                },
                 system=[{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}],
             )
-        except ValidationError as e:
-            # Not logged: the SDK raised inside parse(), so there is no response (usage, request id)
-            raise LLMOutputError(
-                "Output is not valid JSON for the schema (cut off by max_tokens?)"
-            ) from e
+        except APIStatusError as e:  # the API answered with an error status
+            # Same statuses the SDK retries: temporary, so the caller may retry too
+            if e.status_code in (408, 409, 429) or e.status_code >= 500:
+                raise LLMUnavailable(f"provider call failed: {type(e).__name__}") from e
+            raise LLMConfigError(f"provider rejected the request: {type(e).__name__}") from e
+        except APIConnectionError as e:  # no answer at all: timeout or dropped
+            raise LLMUnavailable(f"provider call failed: {type(e).__name__}") from e
 
         latency_ms = (time.perf_counter() - start) * 1000
         cost = _cost_usd(self._model, response.usage)
@@ -181,10 +208,15 @@ class LLMClient:
 
         if response.stop_reason != "end_turn":
             raise LLMOutputError(f"stop_reason={response.stop_reason}")
-        if response.parsed_output is None:
+
+        text = next((b.text for b in response.content if b.type == "text"), None)
+        if text is None:
             raise LLMOutputError("no text block in the response")
 
-        return response.parsed_output
+        try:
+            return schema.model_validate_json(text)
+        except ValidationError as e:
+            raise LLMOutputError("output does not match the schema") from e
 
     async def close(self) -> None:
         """Close the underlying HTTP connections; call once on shutdown."""

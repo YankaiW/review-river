@@ -16,8 +16,8 @@ from pydantic import BaseModel
 from review_river.api import app
 from review_river.classifier import ClassifierUnavailable
 from review_river.deps import get_classifier, get_llm, get_settings
-from review_river.domain import Category, Classification, Review
-from review_river.llm import LLMClient, LLMOutputError
+from review_river.domain import MAX_REVIEW_CHARS, Category, Classification, Review
+from review_river.llm import LLMClient, LLMConfigError, LLMOutputError
 
 
 class FakeClassifier:
@@ -132,7 +132,9 @@ class TestClassifyEndpoint:
 
         assert fake.seen == [Review(text="Game crashes")]
 
-    @pytest.mark.parametrize("body", [{"text": "   "}, {}, {"text": 123}])
+    @pytest.mark.parametrize(
+        "body", [{"text": "   "}, {}, {"text": 123}, {"text": "a" * (MAX_REVIEW_CHARS + 1)}]
+    )
     def test_invalid_body_is_rejected_before_classifier(
         self, client: TestClient, fake: FakeClassifier, body: dict[str, object]
     ) -> None:
@@ -233,12 +235,21 @@ class RaisingClassifier:
 
 
 class FailingLLM:
-    """Stand-in for ``LLMClient`` whose ``parse`` always fails with no usable output."""
+    """Stand-in for ``LLMClient`` whose ``parse`` always raises the given error.
+
+    Parameters
+    ----------
+    error : Exception
+        Raised on every ``parse`` call, e.g. ``LLMOutputError`` or ``LLMConfigError``.
+    """
+
+    def __init__(self, error: Exception) -> None:
+        self._error = error
 
     async def parse[T: BaseModel](
         self, *, system: str, prompt: str, schema: type[T], max_tokens: int = 1024
     ) -> T:
-        """Raise ``LLMOutputError`` as a ``max_tokens`` cut-off would.
+        """Raise the error given to the constructor.
 
         Parameters
         ----------
@@ -256,7 +267,7 @@ class FailingLLM:
         T
             Never returns.
         """
-        raise LLMOutputError("stop_reason=max_tokens")
+        raise self._error
 
 
 @pytest.fixture
@@ -333,8 +344,33 @@ class TestClassifierErrors:
         overrides : dict[Callable[..., Any], Callable[..., Any]]
             The app's dependency overrides.
         """
-        overrides[get_llm] = FailingLLM
+        overrides[get_llm] = lambda: FailingLLM(LLMOutputError("stop_reason=max_tokens"))
 
         response = TestClient(app).post("/classify", json={"text": "Game crashes"})
 
         assert response.status_code == 503
+
+    @pytest.mark.usefixtures("llm_backend")
+    def test_llm_config_error_reaches_client_as_500(
+        self, overrides: dict[Callable[..., Any], Callable[..., Any]]
+    ) -> None:
+        """Full chain: ``LLMConfigError`` passes ``LLMClassifier`` unwrapped → 500.
+
+        A bad key or unknown model is a configuration bug, not an outage, so
+        the caller gets no ``Retry-After``. Only the LLM is faked; settings,
+        ``get_classifier``, the adapter and the handler are real.
+
+        Parameters
+        ----------
+        overrides : dict[Callable[..., Any], Callable[..., Any]]
+            The app's dependency overrides.
+        """
+        overrides[get_llm] = lambda: FailingLLM(
+            LLMConfigError("provider rejected the request: AuthenticationError")
+        )
+
+        response = TestClient(app, raise_server_exceptions=False).post(
+            "/classify", json={"text": "Game crashes"}
+        )
+
+        assert response.status_code == 500

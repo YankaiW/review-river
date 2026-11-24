@@ -2,9 +2,7 @@
 
 import logging
 
-import httpx2
 import pytest
-from anthropic import APIConnectionError
 from pydantic import BaseModel
 
 from review_river.classifier import (
@@ -17,7 +15,7 @@ from review_river.classifier import (
     StructuredLLM,
 )
 from review_river.domain import Category, Classification, Review
-from review_river.llm import LLMClient, LLMOutputError
+from review_river.llm import LLMClient, LLMConfigError, LLMOutputError, LLMUnavailable
 
 VALID_LABEL: dict[str, object] = {
     "reason": "mentions a crash",
@@ -172,9 +170,7 @@ class TestLLMClassifier:
         "error",
         [
             LLMOutputError("stop_reason=refusal"),
-            APIConnectionError(
-                request=httpx2.Request("POST", "https://api.anthropic.com/v1/messages")
-            ),
+            LLMUnavailable("provider call failed"),
         ],
         ids=["unusable-output", "provider-error"],
     )
@@ -198,6 +194,13 @@ class TestLLMClassifier:
                 Review(text="Crashes")
             )
 
+    async def test_config_error_is_not_masked(self) -> None:
+        """A config error (bad key, unknown model) propagates, so the API gives 500, not 503."""
+        with pytest.raises(LLMConfigError):
+            await LLMClassifier(
+                FakeLLM(LLMConfigError("provider rejected the request: AuthenticationError"))
+            ).classify(Review(text="Crashes"))
+
     async def test_out_of_range_confidence_is_rejected(self) -> None:
         """``confidence`` above 1 fails ``LLMLabel`` validation instead of passing through."""
         with pytest.raises(ValueError, match="less than or equal to 1"):
@@ -205,8 +208,13 @@ class TestLLMClassifier:
                 Review(text="Crashes")
             )
 
-    async def test_logs_label_and_reason(self, caplog: pytest.LogCaptureFixture) -> None:
-        """One info line with category, confidence and reason; the review text is not logged.
+    async def test_logs_label_at_info_without_reason(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """At INFO, only category and confidence are logged; no reason, no review text.
+
+        ``reason`` usually quotes the review, so it must not reach a service
+        logging at INFO.
 
         Parameters
         ----------
@@ -214,6 +222,23 @@ class TestLLMClassifier:
             Captures log records emitted during the test.
         """
         caplog.set_level(logging.INFO, logger="review_river.classifier")
+
+        await LLMClassifier(FakeLLM(VALID_LABEL)).classify(Review(text="Secret review text"))
+
+        assert "category=bug" in caplog.text
+        assert "confidence=0.90" in caplog.text
+        assert "reason=" not in caplog.text
+        assert "Secret review text" not in caplog.text
+
+    async def test_logs_reason_at_debug(self, caplog: pytest.LogCaptureFixture) -> None:
+        """At DEBUG, the model's ``reason`` is logged too (smoke and eval runs need it).
+
+        Parameters
+        ----------
+        caplog : pytest.LogCaptureFixture
+            Captures log records emitted during the test.
+        """
+        caplog.set_level(logging.DEBUG, logger="review_river.classifier")
 
         await LLMClassifier(FakeLLM(VALID_LABEL)).classify(Review(text="Secret review text"))
 
