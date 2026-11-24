@@ -126,3 +126,18 @@ Break-it: a prompt over the context window, Haiku 5.5, `probe_llm.py overflow` t
 - The service gets it wrong. `Review` has no length limit, so the whole text goes to Claude; `classifier.py` wraps every `APIError` (the 400 included) in `ClassifierUnavailable`, and `api.py` turns that into 503 + `Retry-After: 5`. A client that obeys it retries an input that can never succeed, uploading 4.5 MB each time; monitoring sees an outage; the caller never learns the input is the problem (the cause is only in the server log).
 - Session 4: (1) cap `Review.text` (the samples are all < 200 chars; ~10–20K chars leaves room) so FastAPI returns 422 before any provider call; (2) map provider errors by cause: an input the provider rejects → 4xx to the caller, a wrong key/model/parameter (401/403/404/400) → 500, only 429/5xx/timeouts → 503 with `Retry-After`.
 - Prediction: _(add yours)_.
+
+Session 4, the W2 debts, each test-first (a failing test before the fix), 82 tests at the end:
+
+| debt | before | after | commit |
+|---|---|---|---|
+| Every billed call logged | `messages.parse` validated inside the SDK, so a cut-off answer raised before `usage` was logged or added to `total_cost_usd` | `messages.create` with the schema in `output_config.format`; log and count first, then `stop_reason`, then `model_validate_json` | `5026c0c` |
+| Provider-free port | `classifier.py` imported `anthropic.APIError` | `LLMClient` wraps SDK errors in `LLM*` errors (cause chained); ruff `TID251` bans `anthropic` outside `llm.py`, `tests/test_llm.py`, `scripts/` | `cea13bd` |
+| Honest errors | every provider failure → 503 + `Retry-After` | `Review.text` ≤ 10,000 chars → 422 before any call; no response or 408/409/429/5xx → `LLMUnavailable` → 503; any other 4xx → `LLMConfigError`, not wrapped → 500 | `605c752`, `399e5e2` |
+| Review text in logs | `llm_label … reason=…` at INFO quoted the review | `llm_label` (category, confidence) at INFO, `llm_reason` at DEBUG; `smoke_llm.py` turns DEBUG on for the classifier logger | `78469ab` |
+
+- Test-first caught two test bugs before they could hide a fix: asserts inside `pytest.raises` never run, and a copied test that asserted the old 503. A test that passes before the fix proves nothing, so each new test was run red first.
+- Order matters in `except` chains: `LLMUnavailable` is an `LLMError`, so it has to be caught first. The classifier now names the two errors it handles (`LLMUnavailable`, `LLMOutputError`) instead of the base class, so a new `LLMError` subclass surfaces as a 500 instead of hiding behind a 503.
+- Config errors vs outages: chose per-request mapping over a startup `count_tokens` check. It also catches a key revoked while running and bad-parameter 400s, costs no extra call, and a provider outage at startup doesn't stop the service from starting. The length cap makes "a provider 400 = our bug" true.
+- `banned-api` on `"anthropic"` also catches `anthropic.types` and `import anthropic` (checked with ruff on stdin); the break-it (import re-added to `classifier.py`) failed `make check` as intended.
+- Reasons at DEBUG: service logs keep category and confidence without review text; error analysis gets reasons from the smoke and eval runs.
