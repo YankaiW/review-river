@@ -143,11 +143,22 @@
 * Because the tokenizer is mostly based on English, where the most merging happens, when using other languages, the merging 
   cannot work well as English does, which give us longer encoded sequence.
 
+**Reference answer:**
+* A token is a piece of text, usually a word or part of one, mapped to an integer id in the tokenizer's vocabulary. Common words are one token; rare words split into several.
+* The vocabulary comes from merging frequent sequences in mostly-English text, so English packs into fewer tokens.
+* Same review: English 32, German 65 (2.0×, long compounds split), Chinese 40 (1.25×). Compare tokens for the same content, not tokens per character.
+
 
 ### 2. Why do output tokens cost 5× input tokens, and why does a long prompt add little latency while a long answer adds a lot?
 
 * During input prefill can do work on parallel, while the decoder during output needs to spend a whole pass of weights on each token.
 * Because all input token can be processed in parallel, while one output token needs to be written one by one.
+
+**Reference answer:**
+* Prefill reads all input tokens in one parallel pass; each weight is reused across thousands of tokens, so the GPU stays busy.
+* Decode makes one token per step, and each step reads all weights plus the KV cache from memory: limited by memory bandwidth, not compute.
+* Measured on Haiku: ~13.5 ms per 1K input tokens vs ~6.4 ms per output token, so one output token takes as long as ~475 input tokens.
+* The 5× is pricing; batching many users' decodes together shrinks the real gap.
 
 
 ### 3. What does the KV cache do inside one request, and how does prompt caching across requests (W2) build on it?
@@ -155,10 +166,21 @@
 * KV cache writes Key and Value matrices into cache, so when it process each token in input, they don't need to be re-calculated.
 * The system prompt can be cached then each following requested prompt can re-use system prompt with lower cost.
 
+**Reference answer:**
+* KV cache (one request): prefill computes K and V for every input token once and keeps them; each decode step computes K and V only for the new token and reads the rest. It saves recompute, not reads.
+* Prompt cache (across requests): the server keeps the KV of a prompt prefix for 5 minutes (refreshed on each hit). A request with a byte-identical prefix skips prefill for it.
+* Write 1.25× input price, read 0.10×. Measured on Haiku, ~50K tokens: $0.0005 vs $0.00495, 1,183 vs 1,506 ms. Mainly a cost lever.
+
 
 ### 4. If current Claude models take no `temperature`, where does run-to-run variation come from, and how much of it does your classifier show?
 
 * The run-to-run variation can come from GPU math calculation.
+
+**Reference answer:**
+* No `temperature` parameter does not mean greedy decoding: the provider may still sample at its own setting.
+* Floating-point sums depend on order, and order changes with server batch size, so near-tied tokens can flip. Longer outputs (thinking) give more chances to diverge.
+* Measured, 3 runs × 20 samples: no label flips on either model. Confidence spread mean / max: Opus 0.01 / 0.10, Haiku 0.05 / 0.25. Opus "18/20 agree" is 4 failed calls, likely timeouts.
+* So labels are stable but confidence moves; don't trust thresholds finer than ±0.1–0.25.
 
 
 ### 5. For `/ask` over 10,000 reviews: how do putting everything in the context and retrieving the top 20 (RAG) differ in cost, latency and failure modes?
@@ -175,4 +197,3 @@
   * Both: counting questions ("how many mention crashes?") need classifier labels plus a database count, not the LLM.
 * What W5 can measure: recall@20 on labelled questions; a planted review at start, middle and end of the long prompt; whether cited reviews support the answer (LLM judge); whether new reviews are found.
 * Choose long context anyway when the corpus fits with margin and gets many questions within the cache TTL, when a question needs the whole corpus at once, or to prototype before building retrieval.
-
