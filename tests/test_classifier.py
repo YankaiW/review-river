@@ -208,8 +208,13 @@ class TestLLMClassifier:
                 Review(text="Crashes")
             )
 
-    async def test_logs_label_and_reason(self, caplog: pytest.LogCaptureFixture) -> None:
-        """One info line with category, confidence and reason; the review text is not logged.
+    async def test_logs_label_at_info_without_reason(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """At INFO, only category and confidence are logged; no reason, no review text.
+
+        ``reason`` usually quotes the review, so it must not reach a service
+        logging at INFO.
 
         Parameters
         ----------
@@ -217,6 +222,23 @@ class TestLLMClassifier:
             Captures log records emitted during the test.
         """
         caplog.set_level(logging.INFO, logger="review_river.classifier")
+
+        await LLMClassifier(FakeLLM(VALID_LABEL)).classify(Review(text="Secret review text"))
+
+        assert "category=bug" in caplog.text
+        assert "confidence=0.90" in caplog.text
+        assert "reason=" not in caplog.text
+        assert "Secret review text" not in caplog.text
+
+    async def test_logs_reason_at_debug(self, caplog: pytest.LogCaptureFixture) -> None:
+        """At DEBUG, the model's ``reason`` is logged too (smoke and eval runs need it).
+
+        Parameters
+        ----------
+        caplog : pytest.LogCaptureFixture
+            Captures log records emitted during the test.
+        """
+        caplog.set_level(logging.DEBUG, logger="review_river.classifier")
 
         await LLMClassifier(FakeLLM(VALID_LABEL)).classify(Review(text="Secret review text"))
 

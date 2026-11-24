@@ -238,6 +238,8 @@ async def main() -> None:
     if args.runs < 1:
         parser.error("--runs must be >= 1")
     logging.basicConfig(level=logging.INFO)
+    # The classifier logs the model's reason at DEBUG; show it here for error analysis
+    logging.getLogger("review_river.classifier").setLevel(logging.DEBUG)
     settings = get_settings()
     samples = load_samples(SAMPLES)
     runs: dict[str, list[ModelResult]] = {m: [] for m in MODELS}

@@ -280,9 +280,9 @@ class LLMClassifier:
             raise ClassifierUnavailable("LLM gave no usable answer") from e
 
         logger.info(
-            "llm_label category=%s confidence=%.2f reason=%r",
+            "llm_label category=%s confidence=%.2f",
             label.category,
             label.confidence,
-            label.reason,
         )
+        logger.debug("llm_reason reason=%r", label.reason)
         return Classification(category=label.category, confidence=label.confidence)

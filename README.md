@@ -74,9 +74,15 @@ REVIEW_RIVER_CLASSIFIER_BACKEND=llm make run
 
 The same `curl` now returns Claude's label, e.g.
 `{"category":"bug","confidence":0.97}`. Each call logs one line with model,
-input, output and cache tokens, latency, cost in USD and the request id. If the
-provider fails or the answer is unusable, the API returns `503` with
-`Retry-After: 5`; other errors stay `500`.
+input, output and cache tokens, latency, cost in USD and the request id, and one
+line with the label (`llm_label category=… confidence=…`). The model's `reason`,
+which usually quotes the review, is logged only at `DEBUG`, so review text stays
+out of service logs; `scripts/smoke_llm.py` turns it on for error analysis.
+
+Reviews over 10,000 characters get `422` before any provider call. A temporary
+provider failure (timeout, 429, 5xx) or an unusable answer gives `503` with
+`Retry-After: 5`; a configuration error (bad key, unknown model, rejected
+request) and any other error give `500`.
 
 ### With Docker
 
